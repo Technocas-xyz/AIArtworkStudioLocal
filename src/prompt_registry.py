@@ -63,6 +63,21 @@ PROMPT_KEYS: dict[str, str] = {
     "CUSTOM_ASPECT_ADVICE": "AIS.RATIO.PLAN",
     "CUSTOM_ASPECT_BASELINE": "AIS.RATIO.BASELINE",
     "CUSTOM_ASPECT_REGENERATE": "AIS.RATIO.REGENERATE",
+    # In config/workflows.py and kept in the library, but no screen sends them yet.
+    "EXTRACT_BOXES": "AIS.EXTRACT.BOXES",
+    "EXTRACT_ARTWORKS": "AIS.EXTRACT.SEPARATE",
+    "MOCKUP_REGENERATE": "AIS.EXTRACT.REGENERATE",
+    # Black Out and Half Tone now run locally (Pillow); their ChatGPT wording is kept.
+    "CUSTOM_BLACK_OUT": "AIS.PRINTREADY.BLACK_OUT",
+    "CUSTOM_HALF_TONE": "AIS.PRINTREADY.HALF_TONE",
+    # The original edit-options job (API only): base block + one block per option.
+    "BASE_INSTRUCTION": "AIS.EDIT.BASE",
+    "JOB_OPTION_TEXT_ONLY": "AIS.EDIT.TEXT_ONLY",
+    "JOB_OPTION_REMOVE_BACKGROUND": "AIS.EDIT.REMOVE_BACKGROUND",
+    "JOB_OPTION_CHANGE_BACKGROUND": "AIS.EDIT.CHANGE_BACKGROUND",
+    "JOB_OPTION_BLUR_BACKGROUND": "AIS.EDIT.BLUR_BACKGROUND",
+    "JOB_OPTION_RECOLOUR": "AIS.EDIT.RECOLOUR",
+    "JOB_OPTION_UPSCALE_CLEANUP": "AIS.EDIT.UPSCALE_CLEANUP",
 }
 
 # Which prompts each workflow can use, for the per-job snapshot and the run log.
@@ -118,7 +133,25 @@ def template_fields(template: str) -> set[str]:
         return {"<malformed>"}
 
 
+OPTION_PREFIX = "JOB_OPTION_"
+
+
+def option_template_name(option_key: str) -> str:
+    return OPTION_PREFIX + option_key.upper()
+
+
+def is_composed(name: str) -> bool:
+    """Blocks that are joined into one bigger prompt rather than sent on their own."""
+    return name == "BASE_INSTRUCTION" or name.startswith(OPTION_PREFIX)
+
+
 def _builtin(name: str) -> str:
+    if name == "BASE_INSTRUCTION":
+        from src.prompt_builder import BASE_INSTRUCTION
+        return BASE_INSTRUCTION
+    if name.startswith(OPTION_PREFIX):
+        from config.job_options import JOB_OPTIONS
+        return JOB_OPTIONS[name[len(OPTION_PREFIX):].lower()]
     from config import workflows
     return getattr(workflows, name)
 
@@ -256,12 +289,17 @@ class PromptRegistry:
 registry = PromptRegistry()
 
 
-def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = None) -> list[str]:
+def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = None,
+                         options: list[str] | None = None) -> list[str]:
     if workflow == "custom":
         names: list[str] = []
         for op in custom_operations or []:
             names.extend(CUSTOM_OPERATION_PROMPTS.get(op, []))
         return names
+    if not workflow and options:
+        # The edit-options job: the base block, then one block per chosen option.
+        return ["BASE_INSTRUCTION"] + [option_template_name(o) for o in options
+                                       if option_template_name(o) in PROMPT_KEYS]
     return list(WORKFLOW_PROMPTS.get(workflow, []))
 
 

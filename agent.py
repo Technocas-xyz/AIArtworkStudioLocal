@@ -479,7 +479,8 @@ def _rename_chat_once(page: Any, job: dict) -> None:
 
 def _run_legacy_job(page: Any, job: dict[str, Any]) -> None:
     try:
-        prompt = build_prompt(options=job["options"], params=job["params"], custom_note=job["custom_note"])
+        prompt = build_prompt(options=job["options"], params=job["params"], custom_note=job["custom_note"],
+                              templates=job.get("managed_prompts"))
         image_paths = [str(INPUT_DIR / f) for f in job["files"]]
         images = generate(page=page, image_paths=image_paths, prompt=prompt, run_id=job["id"], workflow=job.get("workflow"))
         originals = list(images)

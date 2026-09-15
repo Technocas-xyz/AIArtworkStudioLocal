@@ -43,6 +43,7 @@ from src import printshop
 from src.prompt_registry import (
     registry as prompt_registry, prompt_names_for_job, report_runs,
     PROMPT_KEYS, SOURCE_APP as PROMPT_SOURCE_APP, MODEL as PROMPT_MODEL,
+    is_composed as is_prompt_block,
 )
 from src.nc_live import watcher as nc_watcher
 
@@ -618,7 +619,7 @@ def create_job(req: GenerateRequest):
     # The prompts this job will run, frozen now: a version published while the
     # job is running does not change it half way. A box the designer changed is
     # kept as they wrote it and recorded as an edit.
-    prompt_names = prompt_names_for_job(req.workflow, req.custom_operations)
+    prompt_names = prompt_names_for_job(req.workflow, req.custom_operations, req.options)
     managed = prompt_registry.snapshot(prompt_names)
     live = managed["templates"]
     edited: list[str] = []
@@ -1396,7 +1397,7 @@ def _report_prompt_runs(job: dict) -> None:
         return
     _prompt_runs_reported.add(job_id)
     try:
-        names = prompt_names_for_job(job.get("workflow", ""), job.get("custom_operations"))
+        names = prompt_names_for_job(job.get("workflow", ""), job.get("custom_operations"), job.get("options"))
         sent = [str(p) for p in job.get("prompts", []) if p]
         meta_all = job.get("prompt_meta") or {}
         edited = set(job.get("prompt_edited") or [])
@@ -1413,7 +1414,9 @@ def _report_prompt_runs(job: dict) -> None:
             matched: list[str] = []
             for tpl in candidates:
                 pat = _template_pattern(tpl)
-                matched = [p for p in sent if pat and pat.fullmatch(p)]
+                # A base/option block is one part of the composed prompt, so look inside it.
+                hit = (lambda p: pat.search(p)) if is_prompt_block(name) else (lambda p: pat.fullmatch(p))
+                matched = [p for p in sent if pat and hit(p)]
                 if matched:
                     break
             if not matched:
