@@ -501,6 +501,17 @@ def _run_legacy_job(page: Any, job: dict[str, Any]) -> None:
         raise
 
 
+def _tpl(job: dict[str, Any], name: str, default: str) -> str:
+    """The prompt template the server chose for this job, else the built-in text.
+
+    The server reads the live version of each prompt from Decoinks Prompt
+    Management and sends it with the job as `managed_prompts`, so what ChatGPT is
+    told can change without an agent update. A job from an older server, or one
+    created while Decoinks was unreachable, simply runs on the built-in text.
+    """
+    return (job.get("managed_prompts") or {}).get(name) or default
+
+
 def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     job_id = job["id"]
     client = job["client"]
@@ -508,9 +519,9 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     text = job["text"]
     text_image = job.get("text_image", "")
 
-    tpl_turn1 = job.get("template_turn1") or TEXT_TURN_1
-    tpl_turn2 = job.get("template_turn2") or TEXT_TURN_2
-    tpl_turn3 = job.get("template_turn3") or TEXT_TURN_3
+    tpl_turn1 = job.get("template_turn1") or _tpl(job, "TEXT_TURN_1", TEXT_TURN_1)
+    tpl_turn2 = job.get("template_turn2") or _tpl(job, "TEXT_TURN_2", TEXT_TURN_2)
+    tpl_turn3 = job.get("template_turn3") or _tpl(job, "TEXT_TURN_3", TEXT_TURN_3)
 
     from src.vault import VAULT_DIR
     task_dir = VAULT_DIR / client / task_id
@@ -529,7 +540,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     if text_image and not text:
         job["stage"] = 0
         job["stage_label"] = "Reading text from image"
-        prompt0 = TEXT_TURN_0
+        prompt0 = _tpl(job, "TEXT_TURN_0", TEXT_TURN_0)
         extracted_text = send_text_turn(page, prompt=prompt0, image_paths=[str(INPUT_DIR / text_image)], run_id=f"{job_id}_t0")
         _rename_chat_once(page, job)
         job.setdefault("prompts", []).append(prompt0)
@@ -566,7 +577,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         job["stage"] = 1
         job["awaiting_input"] = True
         job["paused_at"] = time.time()
-        job["template_turn2"] = job.get("template_turn2") or TEXT_TURN_2
+        job["template_turn2"] = job.get("template_turn2") or _tpl(job, "TEXT_TURN_2", TEXT_TURN_2)
         job["status"] = "awaiting_selection"
         _wait_for_resume(job_id)
 
@@ -612,7 +623,7 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         job["stage"] = 2
         job["awaiting_input"] = True
         job["paused_at"] = time.time()
-        job["template_turn3"] = job.get("template_turn3") or TEXT_TURN_3
+        job["template_turn3"] = job.get("template_turn3") or _tpl(job, "TEXT_TURN_3", TEXT_TURN_3)
         job["status"] = "awaiting_selection"
         _wait_for_resume(job_id)
 
@@ -701,7 +712,7 @@ def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
     _track_start(job)
     _open_chat_for(page, job)
 
-    extract_tpl = job.get("template_extract") or EXTRACT_CONTACT_SHEET
+    extract_tpl = job.get("template_extract") or _tpl(job, "EXTRACT_CONTACT_SHEET", EXTRACT_CONTACT_SHEET)
     job.setdefault("prompts", []).append(extract_tpl)
 
     images1 = send_turn(page, prompt=extract_tpl, image_paths=[str(image_path)], run_id=f"{job_id}_contact")
@@ -735,7 +746,7 @@ def _run_mockup_workflow(page: Any, job: dict[str, Any]) -> None:
     total = len(chosen_numbers)
     job["stage_label"] = f"Generating {total} design(s)"
 
-    regen_tpl = job.get("template_regen") or EXTRACT_SINGLE
+    regen_tpl = job.get("template_regen") or _tpl(job, "EXTRACT_SINGLE", EXTRACT_SINGLE)
     final_names: list[str] = []
 
     for i, n in enumerate(chosen_numbers, 1):
@@ -789,7 +800,7 @@ def _run_artwork_workflow(page: Any, job: dict[str, Any]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     job["vault_folder"] = str(run_dir)
 
-    regen_tpl = job.get("template_regen") or ARTWORK_REGENERATE
+    regen_tpl = job.get("template_regen") or _tpl(job, "ARTWORK_REGENERATE", ARTWORK_REGENERATE)
     total = len(artwork_files)
     job["stage"] = 1
     job["stage_label"] = f"Regenerating {total} artwork(s)"
@@ -879,9 +890,9 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
 
     # Default prompts for each operation
     default_prompts = {
-        "reconstruct": CUSTOM_RECONSTRUCT,
-        "remove_background": CUSTOM_REMOVE_BACKGROUND,
-        "halo_removal": CUSTOM_HALO_REMOVAL,
+        "reconstruct": _tpl(job, "CUSTOM_RECONSTRUCT", CUSTOM_RECONSTRUCT),
+        "remove_background": _tpl(job, "CUSTOM_REMOVE_BACKGROUND", CUSTOM_REMOVE_BACKGROUND),
+        "halo_removal": _tpl(job, "CUSTOM_HALO_REMOVAL", CUSTOM_HALO_REMOVAL),
         # black_out and half_tone are deterministic LOCAL ops (src/postprocess.py) — no prompt.
         # change_object_color is handled separately (two turns, two templates); not a single-turn default.
     }
@@ -912,7 +923,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
             #   change_object_detect -> Step A (list objects, text reply)
             #   change_object_apply  -> Step B (apply colours, {changes}, image reply)
             # Turn A: detect objects (text reply)
-            detect_prompt = custom_prompts.get("change_object_detect", CUSTOM_DETECT_OBJECTS)
+            detect_prompt = custom_prompts.get("change_object_detect") or _tpl(job, "CUSTOM_DETECT_OBJECTS", CUSTOM_DETECT_OBJECTS)
             print(f"[custom] Turn A (detect) prompt [:200]:\n{detect_prompt[:200]}")
             job.setdefault("prompts", []).append(detect_prompt)
 
@@ -944,7 +955,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
             changes_text = "\n".join(f"- {c['object']} \u2192 {c['color']}" for c in object_choices)
             print(f"[custom] Change colour changes_text:\n{changes_text}")
             # Turn B uses its OWN template (change_object_apply), never the detection one.
-            apply_template = custom_prompts.get("change_object_apply", CUSTOM_CHANGE_COLOR)
+            apply_template = custom_prompts.get("change_object_apply") or _tpl(job, "CUSTOM_CHANGE_COLOR", CUSTOM_CHANGE_COLOR)
             if "{changes}" not in apply_template:
                 # Operator edited out the placeholder; append the changes so they are never lost.
                 apply_template = apply_template + "\n\n{changes}"
@@ -994,7 +1005,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
 
             # --- Turn A: baseline (clean, current ratio, background removed) ---
             job["stage_label"] = f"Step {i} of {total} \u2014 Cleaning artwork (baseline)"
-            baseline_prompt = CUSTOM_ASPECT_BASELINE
+            baseline_prompt = _tpl(job, "CUSTOM_ASPECT_BASELINE", CUSTOM_ASPECT_BASELINE)
             print(f"[custom] Aspect baseline prompt [:200]:\n{baseline_prompt[:200]}")
             job.setdefault("prompts", []).append(baseline_prompt)
             try:
@@ -1029,7 +1040,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
 
             # --- Turn B: recommend target ratios (text), based on the baseline ---
             b_info = image_info(baseline_path, dpi_override=job.get("aspect_dpi") or None)
-            advice_tpl = custom_prompts.get("aspect_ratio", CUSTOM_ASPECT_ADVICE)
+            advice_tpl = custom_prompts.get("aspect_ratio") or _tpl(job, "CUSTOM_ASPECT_ADVICE", CUSTOM_ASPECT_ADVICE)
             advice_prompt = advice_tpl.format(
                 width=b_info["width"], height=b_info["height"], ratio=b_info["ratio"],
                 inches_w=b_info["inches_w"], inches_h=b_info["inches_h"], dpi=b_info["dpi"],
@@ -1077,7 +1088,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
                 else:
                     in_h = round(max(b_info.get("inches_w", 0), b_info.get("inches_h", 0)) or th, 2)
                     in_w = round(in_h * (tw / th), 2)
-                regen_prompt = CUSTOM_ASPECT_REGENERATE.format(
+                regen_prompt = _tpl(job, "CUSTOM_ASPECT_REGENERATE", CUSTOM_ASPECT_REGENERATE).format(
                     ratio=ratio_str, inches_w=in_w, inches_h=in_h, dpi=dpi,
                 )
                 print(f"[custom] Aspect target prompt [:200]:\n{regen_prompt[:200]}")
@@ -1164,7 +1175,7 @@ def _run_custom_workflow(page: Any, job: dict[str, Any]) -> None:
 
         else:
             # Single-turn operation
-            prompt = custom_prompts.get(op, default_prompts.get(op, ""))
+            prompt = custom_prompts.get(op) or default_prompts.get(op, "")
             job.setdefault("prompts", []).append(prompt)
 
             try:
