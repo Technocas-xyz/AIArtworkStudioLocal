@@ -74,6 +74,8 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .ps-wrk-note{font-size:.76rem;opacity:.8;line-height:1.45;margin-bottom:10px}
 .ps-wrk .vm-btn{width:100%}
 .ps-wrk-or{font-size:.72rem;opacity:.6;margin-top:10px}
+.nc-file.arrived{box-shadow:0 0 0 2px var(--accent,#6366f1),0 6px 20px rgba(99,102,241,.25)}
+.nc-arrived{position:absolute;top:4px;left:4px;z-index:2;background:var(--accent,#6366f1);color:#fff;font-size:8px;font-weight:700;letter-spacing:.04em;padding:2px 5px;border-radius:4px}
 .vm-modal{background:var(--surface);border-radius:var(--radius);width:100%;max-width:420px;box-shadow:0 12px 40px rgba(0,0,0,.25);overflow:hidden;display:flex;flex-direction:column;max-height:90vh}
 .vm-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
 .vm-head h3{font-size:.95rem;font-weight:700}.vm-head .vm-x{cursor:pointer;font-size:1.2rem;color:var(--muted);line-height:1;border:none;background:none}
@@ -145,7 +147,7 @@ var currentWorkflow="nextcloud";
 // PrintShop's index: we never act on it here, we only hand it back when saving
 // so the generated file is filed as the next WRK version of the SAME design
 // instead of starting a new one.
-var psAsset="",psCode="",psLabel="",psPendingPath="";
+var psAsset="",psCode="",psLabel="",psPendingPath="",psArrivedPath="";
 var lastStatusInfo=null;
 var DT={turn1:"",turn2:"",turn3:""};
 var lastStatus="",lastStage=-1,lastImgKey="";
@@ -1662,6 +1664,11 @@ function ncRenderCustomerSelect(){
   var list=ncCustomers.filter(function(c){return !q||c.label.toLowerCase().indexOf(q)>=0||c.folder.toLowerCase().indexOf(q)>=0});
   var shown=list.slice(0,NC_OPTION_CAP);
   var cur=ncCustomerFolder;
+  // Jo khula hai wo hamesha list me ho — warna dropdown jhoot bolta hai.
+  if(cur&&!shown.some(function(c){return c.folder===cur})){
+    var open=ncCustomers.filter(function(c){return c.folder===cur})[0];
+    if(open)shown=[open].concat(shown);
+  }
   var h='<option value="">'+(ncCustomers.length?"Select a customer…":"No customer folders found")+'</option>';
   for(var i=0;i<shown.length;i++){
     h+='<option value="'+esc(shown[i].path)+'"'+(shown[i].folder===cur?" selected":"")+'>'+esc(shown[i].label)+'</option>';
@@ -1715,7 +1722,15 @@ function ncLoadArtworks(){
       // customer's list has actually arrived.
       if(psPendingPath){
         var hit=ncArtworks.filter(function(f){return f.path===psPendingPath})[0];
-        if(hit&&hit.importable)ncSelected[psPendingPath]=true;
+        if(hit){
+          if(hit.importable)ncSelected[psPendingPath]=true;
+          // Is customer ki 455 tak files ho sakti hain, nayi pehle. Jo file
+          // Design Studio se bheji gayi wo purani ho to grid me kahin dab jati
+          // hai — tick lagi hoti hai par nazar nahi aati. Isliye wahi sab se
+          // upar, aur neeche likh diya jata hai ke kyun.
+          psArrivedPath=psPendingPath;
+          ncArtworks=[hit].concat(ncArtworks.filter(function(f){return f.path!==psPendingPath}));
+        }
         psPendingPath="";
       }
       ncRenderArtworks();ncRenderBanner();
@@ -1731,11 +1746,13 @@ function ncRenderArtworks(){
   if(!ncArtworks.length){
     h+='<div class="nc-empty">No artwork found for '+esc(label)+'.</div>';
   }else{
-    h+='<div class="nc-hint" style="margin-bottom:6px">'+ncArtworks.length+' image'+(ncArtworks.length>1?"s":"")+' · newest first</div>';
+    h+='<div class="nc-hint" style="margin-bottom:6px">'+ncArtworks.length+' image'+(ncArtworks.length>1?"s":"")
+      +(psArrivedPath?' · from the Design Studio, shown first':' · newest first')+'</div>';
     h+='<div class="nc-grid">';
     for(var k=0;k<ncArtworks.length;k++){
       var fi=ncArtworks[k];
-      h+='<div class="nc-file'+(ncSelected[fi.path]?" sel":"")+(fi.importable?"":" dead")+'" data-nc-pick="'+esc(fi.path)+'" title="'+esc(fi.reason||fi.name)+'">';
+      h+='<div class="nc-file'+(ncSelected[fi.path]?" sel":"")+(fi.importable?"":" dead")+(fi.path===psArrivedPath?" arrived":"")+'" data-nc-pick="'+esc(fi.path)+'" title="'+esc(fi.reason||fi.name)+'">';
+      if(fi.path===psArrivedPath)h+='<span class="nc-arrived">FROM STUDIO</span>';
       if(ncFresh[fi.path])h+='<span class="nc-new">NEW</span>';
       if(ncSelected[fi.path])h+='<span class="nc-tick">✓</span>';
       h+='<img loading="lazy" src="/api/nextcloud/thumb?path='+encodeURIComponent(fi.path)+'&w=200&h=200" onerror="this.style.visibility=\'hidden\'">';

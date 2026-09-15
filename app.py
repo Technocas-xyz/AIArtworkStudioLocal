@@ -40,6 +40,11 @@ from src.auth import (
 from src.agent_tokens import token_name, get_or_create_for_name, touch_token, list_agents
 from src import nextcloud as nc
 from src import printshop
+from src.prompt_registry import (
+    registry as prompt_registry, prompt_names_for_job, report_runs,
+    PROMPT_KEYS, SOURCE_APP as PROMPT_SOURCE_APP, MODEL as PROMPT_MODEL,
+    is_composed as is_prompt_block,
+)
 from src.nc_live import watcher as nc_watcher
 
 # ---------------------------------------------------------------------------
@@ -498,17 +503,59 @@ def list_options():
     return [{"key": k, "label": k.replace("_", " ").title(), "needs_value": k in PARAMETERISED_OPTIONS} for k in JOB_OPTIONS]
 
 
+# Prompt text comes from Decoinks Prompt Management (the live version of each
+# prompt), falling back to config/workflows.py. See src/prompt_registry.py.
+_CUSTOM_OP_TEMPLATES = {
+    "reconstruct": {"template": "CUSTOM_RECONSTRUCT"},
+    "remove_background": {"template": "CUSTOM_REMOVE_BACKGROUND"},
+    "halo_removal": {"template": "CUSTOM_HALO_REMOVAL"},
+    "change_object_color": {"template_detect": "CUSTOM_DETECT_OBJECTS", "template_apply": "CUSTOM_CHANGE_COLOR"},
+    "aspect_ratio": {"template": "CUSTOM_ASPECT_ADVICE"},
+}
+# Keys the web UI uses in `custom_prompts` → the template each one overrides.
+_CUSTOM_PROMPT_KEYS = {
+    "reconstruct": "CUSTOM_RECONSTRUCT",
+    "remove_background": "CUSTOM_REMOVE_BACKGROUND",
+    "halo_removal": "CUSTOM_HALO_REMOVAL",
+    "change_object_detect": "CUSTOM_DETECT_OBJECTS",
+    "change_object_apply": "CUSTOM_CHANGE_COLOR",
+    "aspect_ratio": "CUSTOM_ASPECT_ADVICE",
+}
+
+
+def _live_template(name: str) -> str:
+    return prompt_registry.template(name)[0]
+
+
 @app.get("/api/templates")
 def get_templates():
-    # NOTE: custom operations are served via /api/custom-operations with their templates embedded.
-    # TODO: Migrate text/extraction/artwork templates to the same single-sourced pattern.
-    return {"turn1": TEXT_TURN_1, "turn2": TEXT_TURN_2, "turn3": TEXT_TURN_3, "extract": EXTRACT_CONTACT_SHEET, "regen": EXTRACT_SINGLE, "artwork_regen": ARTWORK_REGENERATE, "artwork": ARTWORK_REGENERATE}
+    return {"turn1": _live_template("TEXT_TURN_1"), "turn2": _live_template("TEXT_TURN_2"),
+            "turn3": _live_template("TEXT_TURN_3"), "extract": _live_template("EXTRACT_CONTACT_SHEET"),
+            "regen": _live_template("EXTRACT_SINGLE"), "artwork_regen": _live_template("ARTWORK_REGENERATE"),
+            "artwork": _live_template("ARTWORK_REGENERATE")}
 
 
 @app.get("/api/custom-operations")
 def get_custom_operations():
-    """Serve the single-sourced custom operations list with embedded templates."""
-    return CUSTOM_OPERATIONS
+    """The custom operations list, each carrying the live text of its prompts."""
+    ops = []
+    for op in CUSTOM_OPERATIONS:
+        op = dict(op)
+        for field, name in _CUSTOM_OP_TEMPLATES.get(op["key"], {}).items():
+            op[field] = _live_template(name)
+        ops.append(op)
+    return ops
+
+
+@app.get("/api/prompt-status")
+def prompt_status():
+    """Is Prompt Management reachable, and which live versions is this server using?"""
+    status = prompt_registry.status()
+    status["prompts"] = {
+        name: {k: meta.get(k) for k in ("key", "version", "source", "rejected") if meta.get(k) is not None}
+        for name, meta in prompt_registry.snapshot(list(PROMPT_KEYS))["meta"].items()
+    }
+    return status
 
 
 @app.get("/api/artwork-info")
@@ -546,7 +593,7 @@ def create_job(req: GenerateRequest):
     if req.workflow == "text":
         if not req.text.strip() and not req.text_image.strip():
             raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
-        t1 = req.template_turn1.strip() if req.template_turn1.strip() else TEXT_TURN_1
+        t1 = req.template_turn1.strip() if req.template_turn1.strip() else _live_template("TEXT_TURN_1")
         if "{text}" not in t1:
             raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
     elif req.workflow == "mockup":
@@ -569,6 +616,35 @@ def create_job(req: GenerateRequest):
         if not req.options:
             raise HTTPException(status_code=400, detail="Select at least one option.")
 
+    # The prompts this job will run, frozen now: a version published while the
+    # job is running does not change it half way. A box the designer changed is
+    # kept as they wrote it and recorded as an edit.
+    prompt_names = prompt_names_for_job(req.workflow, req.custom_operations, req.options)
+    managed = prompt_registry.snapshot(prompt_names)
+    live = managed["templates"]
+    edited: list[str] = []
+
+    def _pick(name: str, submitted: str) -> str:
+        if name not in live:
+            return submitted
+        if submitted and not prompt_registry.is_unedited(name, submitted):
+            edited.append(name)
+            return submitted
+        return live[name]
+
+    template_turn1 = _pick("TEXT_TURN_1", req.template_turn1.strip())
+    template_extract = _pick("EXTRACT_CONTACT_SHEET", req.template_extract.strip())
+    if req.workflow == "artwork":
+        template_regen = _pick("ARTWORK_REGENERATE", req.template_regen.strip())
+    elif req.workflow == "mockup":
+        template_regen = _pick("EXTRACT_SINGLE", req.template_regen.strip())
+    else:
+        template_regen = req.template_regen.strip()
+    custom_prompts = dict(req.custom_prompts or {})
+    for ui_key, name in _CUSTOM_PROMPT_KEYS.items():
+        if name in live:
+            custom_prompts[ui_key] = _pick(name, (custom_prompts.get(ui_key) or "").strip())
+
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
         "id": job_id, "status": "queued", "workflow": req.workflow or "",
@@ -581,10 +657,13 @@ def create_job(req: GenerateRequest):
         "stage": 0, "stage_label": "", "awaiting_input": False,
         "selection_prompt": "", "choices": [], "prompts": [],
         "extracted_text": "", "confirmed_text": "", "paused_at": None,
-        "template_turn1": req.template_turn1.strip(),
-        "template_turn2": "", "template_turn3": "",
-        "template_extract": req.template_extract.strip() if hasattr(req, 'template_extract') else "",
-        "template_regen": req.template_regen.strip() if hasattr(req, 'template_regen') else "",
+        "template_turn1": template_turn1,
+        "template_turn2": live.get("TEXT_TURN_2", ""), "template_turn3": live.get("TEXT_TURN_3", ""),
+        "template_extract": template_extract,
+        "template_regen": template_regen,
+        # Prompt Management: the templates chosen for this job, which versions
+        # they came from, and which ones the designer edited.
+        "managed_prompts": live, "prompt_meta": managed["meta"], "prompt_edited": edited,
         "active_time": 0.0,
         "_regenerate": False, "_regen_template": None,
         # Mockup fields
@@ -595,7 +674,7 @@ def create_job(req: GenerateRequest):
         "crop_names": [], "crop_count": 0, "crop_warnings": [],
         "selected_crops": [], "final_names": [], "chosen_numbers": [],
         "artwork_files": req.artwork_files, "artwork_errors": [],
-        "custom_operations": req.custom_operations, "custom_prompts": req.custom_prompts,
+        "custom_operations": req.custom_operations, "custom_prompts": custom_prompts,
         "aspect_dpi": req.aspect_dpi, "aspect_info": None, "aspect_recommendations": "",
         "aspect_target": None, "aspect_method": "pad", "aspect_similarity": None,
         "aspect_original_file": "", "aspect_original_features": None,
@@ -631,10 +710,13 @@ def submit_selection(job_id: str, req: SelectionRequest):
         if stage == 2 and "{m}" not in tpl:
             raise HTTPException(status_code=400, detail="Step 3 prompt must contain {m} placeholder.")
         # Store the template for the NEXT step
-        if stage == 1:
-            job["template_turn2"] = tpl
-        elif stage == 2:
-            job["template_turn3"] = tpl
+        name = "TEXT_TURN_2" if stage == 1 else "TEXT_TURN_3" if stage == 2 else None
+        if name:
+            if prompt_registry.is_unedited(name, tpl):
+                tpl = (job.get("managed_prompts") or {}).get(name) or tpl
+            elif name not in job.setdefault("prompt_edited", []):
+                job["prompt_edited"].append(name)
+            job["template_turn2" if stage == 1 else "template_turn3"] = tpl
 
     job["choices"].append(req.choice)
     job["_regenerate"] = False
@@ -689,6 +771,7 @@ def cancel_job(job_id: str):
     # The agent detects the "cancelled" status on its next poll (progress or
     # paused-input) and aborts the job cleanly. No local event to signal.
     print(f"[cancel] Job {job_id}: {old_status} -> cancelled")
+    _report_prompt_runs(job)
     return {"ok": True}
 
 
@@ -1226,6 +1309,8 @@ _SERVER_OWNED_FIELDS = {
     # agent's stale "awaiting_selection" overwrote the server's "running").
     # `status` is handled specially below (terminal statuses are allowed).
     "awaiting_input", "paused_at",
+    # Prompt Management bookkeeping is decided by the server.
+    "managed_prompts", "prompt_meta", "prompt_edited",
 }
 
 # Terminal statuses the agent IS allowed to set.
@@ -1246,6 +1331,13 @@ def _merge_agent_job(job: dict, posted: dict) -> None:
     """
     if job.get("status") == "cancelled":
         return
+    try:
+        _merge_agent_fields(job, posted)
+    finally:
+        _report_prompt_runs(job)
+
+
+def _merge_agent_fields(job: dict, posted: dict) -> None:
     for k, v in posted.items():
         if k in _SERVER_OWNED_FIELDS:
             continue
@@ -1262,6 +1354,106 @@ def _merge_agent_job(job: dict, posted: dict) -> None:
                       f"job back to a non-terminal status.")
             continue
         job[k] = v
+
+
+# ── Prompt Management run log ────────────────────────────────────────────────
+_prompt_runs_reported: set[str] = set()
+_RUN_STATUS = {"done": "success", "done_with_errors": "success", "failed": "failed", "cancelled": "cancelled"}
+
+
+def _template_pattern(template: str) -> "re.Pattern[str] | None":
+    import string as _string
+    try:
+        parts = []
+        for literal, field, _spec, _conv in _string.Formatter().parse(template):
+            parts.append(re.escape(literal))
+            if field is not None:
+                parts.append(".*?")
+        return re.compile("".join(parts), re.DOTALL)
+    except (ValueError, re.error):
+        return None
+
+
+def _used_template(job: dict, name: str) -> str:
+    """The template this job actually ran for `name` (the designer's edit, if any)."""
+    custom = job.get("custom_prompts") or {}
+    by_field = {
+        "TEXT_TURN_1": job.get("template_turn1"), "TEXT_TURN_2": job.get("template_turn2"),
+        "TEXT_TURN_3": job.get("template_turn3"), "EXTRACT_CONTACT_SHEET": job.get("template_extract"),
+        "EXTRACT_SINGLE": job.get("template_regen"), "ARTWORK_REGENERATE": job.get("template_regen"),
+    }
+    by_field.update({name_: custom.get(ui_key) for ui_key, name_ in _CUSTOM_PROMPT_KEYS.items()})
+    return by_field.get(name) or (job.get("managed_prompts") or {}).get(name) or ""
+
+
+def _report_prompt_runs(job: dict) -> None:
+    """Once a job ends, tell Decoinks which prompt versions it ran and how it went.
+
+    One record per prompt the job actually sent to ChatGPT, holding the exact
+    text sent. Runs in the background and never affects the job."""
+    job_id = job.get("id")
+    status = job.get("status")
+    if not job_id or status not in _RUN_STATUS or job_id in _prompt_runs_reported:
+        return
+    _prompt_runs_reported.add(job_id)
+    try:
+        names = prompt_names_for_job(job.get("workflow", ""), job.get("custom_operations"), job.get("options"))
+        sent = [str(p) for p in job.get("prompts", []) if p]
+        meta_all = job.get("prompt_meta") or {}
+        edited = set(job.get("prompt_edited") or [])
+        started = job.get("started_at")
+        finished = job.get("finished_at") or time.time()
+        files = [n for n in (job.get("images") or []) if isinstance(n, str)]
+        files += [s.get("file") for s in (job.get("custom_steps_done") or []) if isinstance(s, dict) and s.get("file")]
+        files = list(dict.fromkeys(files))[:100]
+        errors = [job.get("error")] if job.get("error") else []
+        errors += [str(e) for e in (job.get("artwork_errors") or [])]
+        runs = []
+        for name in names:
+            candidates = [t for t in (_used_template(job, name), (job.get("managed_prompts") or {}).get(name)) if t]
+            matched: list[str] = []
+            for tpl in candidates:
+                pat = _template_pattern(tpl)
+                # A base/option block is one part of the composed prompt, so look inside it.
+                hit = (lambda p: pat.search(p)) if is_prompt_block(name) else (lambda p: pat.fullmatch(p))
+                matched = [p for p in sent if pat and hit(p)]
+                if matched:
+                    break
+            if not matched:
+                continue  # this prompt never reached ChatGPT in this job
+            meta = meta_all.get(name) or {}
+            runs.append({
+                "prompt_key": PROMPT_KEYS[name],
+                "prompt_version_id": meta.get("version_id"),
+                "source_app": PROMPT_SOURCE_APP,
+                "external_ref": job_id,
+                "status": _RUN_STATUS[status],
+                "prompt_source": "edited" if name in edited else (meta.get("source") or "built_in"),
+                "input_variables": {
+                    "workflow": job.get("workflow"), "client": job.get("client"), "job_number": job.get("task_id"),
+                    "text": job.get("confirmed_text") or job.get("text") or None,
+                    "choices": job.get("choices") or None, "chosen_numbers": job.get("chosen_numbers") or None,
+                    "custom_operations": job.get("custom_operations") or None,
+                    "template": name,
+                },
+                "resolved_prompt": "\n\n----- next send -----\n\n".join(matched)[:200000],
+                "provider": PROMPT_MODEL["provider"], "model": PROMPT_MODEL["model"],
+                "model_parameters": {"interface": "ChatGPT web, driven by the Artwork Agent",
+                                     "agent": job.get("claimed_by_name") or None, "times_sent": len(matched)},
+                "latency_ms": int((finished - started) * 1000) if started else None,
+                "error_message": ("; ".join(errors))[:5000] or None,
+                "output_reference": job.get("vault_folder"),
+                "output_files": [{"file_name": f, "file_url": f"/api/output/{f}"} for f in files],
+            })
+        if runs:
+            report_runs(runs)
+            print(f"[prompts] job {job_id}: reporting {len(runs)} prompt run(s) to Decoinks")
+    except Exception as exc:
+        print(f"[prompts] could not build the run log for job {job_id}: {exc}")
+
+
+# Warm the prompt cache so the first page load already shows the live text.
+threading.Thread(target=prompt_registry.refresh, name="prompt-warmup", daemon=True).start()
 
 
 @app.post("/api/agent/register")
@@ -1486,6 +1678,7 @@ async def agent_error(job_id: str, request: Request):
         job["error"] = message
         job["finished_at"] = time.time()
         job["awaiting_input"] = False
+        _report_prompt_runs(job)
 
     if str(fields.get("session_expired", "")).lower() in ("1", "true", "yes"):
         a = agents.get(job.get("claimed_by"))
