@@ -70,6 +70,14 @@ check("dropping {{value}} is refused", m["source"] == "built_in" and t == JOB_OP
 t, m = reg2.template("EXTRACT_BOXES")
 check("adding {{dpi}} is refused", m["source"] == "built_in" and t == W.EXTRACT_BOXES, m)
 
+# 4b. A prompt retired (Archived) in Decoinks is not served: the built-in text runs.
+retired = {k: t for k, t in same.items() if k not in ("AIS.EXTRACT.BOXES", "AIS.PRINTREADY.BLACK_OUT")}
+reg3 = fake_registry(retired)
+t, m = reg3.template("CUSTOM_BLACK_OUT")
+check("a retired prompt falls back to the built-in text", m["source"] == "built_in" and t == W.CUSTOM_BLACK_OUT, m)
+t, m = reg3.template("TEXT_TURN_1")
+check("the others are still served from Prompt Management", m["source"] == "managed" and t == W.TEXT_TURN_1, m)
+
 # 5. Which prompts each job uses.
 check("text job", prompt_names_for_job("text") == ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"])
 check("custom job", prompt_names_for_job("custom", ["reconstruct", "aspect_ratio"]) ==
