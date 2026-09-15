@@ -27,6 +27,7 @@ def build_prompt(
     options: list[str],
     params: dict[str, str] | None = None,
     custom_note: str | None = None,
+    templates: dict[str, str] | None = None,
 ) -> str:
     """Assemble a multi-line prompt from selected operations.
 
@@ -39,6 +40,10 @@ def build_prompt(
         that contain a {value} placeholder.
     custom_note:
         Freeform text appended at the very end of the prompt (optional).
+    templates:
+        The job's `managed_prompts` from the server (Decoinks Prompt
+        Management): "BASE_INSTRUCTION" and "JOB_OPTION_<KEY>" override the
+        built-in blocks below. Missing entries fall back to the built-in text.
 
     Returns
     -------
@@ -56,10 +61,11 @@ def build_prompt(
 
     _validate(options, params)
 
-    sections: list[str] = [BASE_INSTRUCTION]
+    templates = templates or {}
+    sections: list[str] = [templates.get("BASE_INSTRUCTION") or BASE_INSTRUCTION]
 
     for key in options:
-        block: str = JOB_OPTIONS[key]
+        block: str = templates.get("JOB_OPTION_" + key.upper()) or JOB_OPTIONS[key]
         if key in PARAMETERISED_OPTIONS:
             block = block.format(value=params[key])
         sections.append(block)
