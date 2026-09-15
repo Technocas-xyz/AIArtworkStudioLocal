@@ -19,6 +19,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .field-group{margin-bottom:10px}.field-group label{display:block;font-size:.76rem;font-weight:600;color:var(--muted);margin-bottom:3px}.field-group input,.field-group textarea{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font-size:.88rem;font-family:inherit}.field-group textarea{resize:vertical}
 .text-input-large{width:100%;padding:12px 14px;font-size:1.1rem;font-weight:600;border:2px solid var(--border);border-radius:var(--radius);text-align:center;margin-bottom:10px}.text-input-large:focus{border-color:var(--accent);outline:none}
 .or-divider{text-align:center;font-size:.78rem;color:var(--muted);margin:8px 0;font-weight:600}
+.tmode-tabs{display:flex;gap:6px;margin-bottom:12px}.tmode-tab{flex:1;padding:8px 6px;font-size:.74rem;font-weight:600;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;transition:.15s;line-height:1.2}.tmode-tab:hover{border-color:#c9c9d4}.tmode-tab.active{border-color:var(--accent);background:#eff6ff;color:var(--accent)}
 .gen-btn{width:100%;padding:14px;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;transition:.2s;margin-top:8px}.gen-btn:hover{background:var(--accent-hover)}.gen-btn:disabled{background:#94a3b8;cursor:not-allowed}
 .blocker-msg{font-size:.78rem;color:#dc2626;margin-top:5px;line-height:1.3}
 .edit-toggle{font-size:.74rem;color:var(--muted);cursor:pointer;margin:8px 0 4px;user-select:none}.edit-toggle:hover{color:var(--accent)}.edit-toggle.open::before{content:"▾ "}.edit-toggle::before{content:"▸ "}
@@ -134,6 +135,8 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 (function(){
 var activeJobId=null,pollingTimer=null,elapsedTimer=null,stepStart=null,pauseStart=null;
 var historyItems=[],textImageFile="",mockupImageFile="",workerAlive=true;
+var textMode="typed",replaceImageFile="";  // Text workflow input mode + replace-design upload
+var currentTypedText="",replaceNewText="",replaceTargetText="";  // preserved across mode-tab switches
 var currentWorkflow="nextcloud";
 var lastStatusInfo=null;
 var DT={turn1:"",turn2:"",turn3:""};
@@ -207,42 +210,103 @@ function renderCols(){
   updBtn();
 }
 function renderCol1(){
-  col1.innerHTML='<div class="col-title">Design Text</div><input type="text" class="text-input-large" id="designText" placeholder="Type the text for the design"><div class="or-divider">\u2014 OR upload an image containing the text \u2014</div><div class="drop-zone" id="dz"><p>Drag image here or</p><button class="browse-btn" id="dzBtn">Choose file</button><input type="file" id="dzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="dzErr"></div><div class="uploaded-preview" id="dzPrev"></div>';
-  var dz=$("dz"),btn=$("dzBtn"),fi=$("dzFile"),dt=$("designText");
+  // Three clearly labelled input modes, not a hidden toggle.
+  var modes=[["typed","Type the text"],["from_image","Read text from an image"],["replace","Replace text in a design"]];
+  var tabs='<div class="tmode-tabs">';
+  modes.forEach(function(m){tabs+='<button type="button" class="tmode-tab'+(textMode===m[0]?" active":"")+'" data-tmode="'+m[0]+'">'+m[1]+'</button>'});
+  tabs+='</div>';
+  col1.innerHTML='<div class="col-title">Design Text</div>'+tabs+'<div id="tmodePanel"></div>';
+  col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){textMode=b.dataset.tmode;renderCol1();renderCol2();updBtn()}});
+  renderTextModePanel();
+}
+function renderTextModePanel(){
+  var panel=$("tmodePanel");if(!panel)return;
+  if(textMode==="typed"){
+    panel.innerHTML='<input type="text" class="text-input-large" id="designText" placeholder="Type the text for the design">';
+    var dt=$("designText");if(dt){dt.value=(currentTypedText||"");dt.oninput=function(){currentTypedText=dt.value;updBtn()}}
+  }else if(textMode==="from_image"){
+    panel.innerHTML='<div class="or-divider">Upload an image \u2014 its text will be read and confirmed</div><div class="drop-zone" id="dz"><p>Drag image here or</p><button class="browse-btn" id="dzBtn">Choose file</button><input type="file" id="dzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="dzErr"></div><div class="uploaded-preview" id="dzPrev"></div>';
+    _wireDropZone("dz","dzBtn","dzFile","dzErr","dzPrev",function(name){textImageFile=name});
+    if(textImageFile)$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';
+  }else{ // replace
+    panel.innerHTML=''
+      +'<div class="or-divider">Upload the finished design to change the wording in</div>'
+      +'<div class="drop-zone" id="rdz"><p>Drag design here or</p><button class="browse-btn" id="rdzBtn">Choose file</button><input type="file" id="rdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
+      +'<div class="upload-error" id="rdzErr"></div><div class="uploaded-preview" id="rdzPrev"></div>'
+      +'<div class="field-group"><label>New wording</label><input type="text" id="rNew" placeholder="e.g. HAPPY NEW YEAR 2027"></div>'
+      +'<div class="field-group"><label>Text to replace <span style="color:var(--muted);font-weight:400">(optional)</span></label><input type="text" id="rTarget" placeholder="Leave blank to replace all wording"><div class="vm-hint">Name a specific piece of wording when the design has several.</div></div>';
+    _wireDropZone("rdz","rdzBtn","rdzFile","rdzErr","rdzPrev",function(name){replaceImageFile=name});
+    if(replaceImageFile)$("rdzPrev").innerHTML='<img src="/input/'+replaceImageFile+'">';
+    var rn=$("rNew");if(rn){rn.value=(replaceNewText||"");rn.oninput=function(){replaceNewText=rn.value;updBtn()}}
+    var rt=$("rTarget");if(rt){rt.value=(replaceTargetText||"");rt.oninput=function(){replaceTargetText=rt.value}}
+  }
+}
+// Shared drop-zone wiring: uploads to /api/upload and calls setName(savedName).
+function _wireDropZone(dzId,btnId,fiId,errId,prevId,setName){
+  var dz=$(dzId),btn=$(btnId),fi=$(fiId);
+  if(!dz)return;
+  function up(file){
+    $(errId).textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
+    if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$(errId).textContent="Only .png .jpg .jpeg .webp accepted.";return}
+    var fd=new FormData();fd.append("files",file);
+    fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){setName(d.saved[0].name);$(prevId).innerHTML='<img src="/input/'+d.saved[0].name+'">';updBtn()}}).catch(function(e){$(errId).textContent=e.message});
+  }
   btn.onclick=function(e){e.stopPropagation();fi.click()};dz.onclick=function(){fi.click()};
   dz.ondragover=function(e){e.preventDefault();dz.classList.add("dragover")};dz.ondragleave=function(){dz.classList.remove("dragover")};
-  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)upImg(e.dataTransfer.files[0])};
-  fi.onchange=function(){if(fi.files.length)upImg(fi.files[0]);fi.value=""};
-  dt.oninput=function(){if(dt.value.trim()){textImageFile="";$("dzPrev").innerHTML=""}updBtn()};
-  if(textImageFile)$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';
-}
-function upImg(file){
-  $("dzErr").textContent="";var ext="."+file.name.split(".").pop().toLowerCase();
-  if([".png",".jpg",".jpeg",".webp"].indexOf(ext)<0){$("dzErr").textContent="Only .png .jpg .jpeg .webp accepted.";return}
-  var fd=new FormData();fd.append("files",file);
-  fetch("/api/upload",{method:"POST",body:fd}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){if(d.saved&&d.saved.length){textImageFile=d.saved[0].name;$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';var dt=$("designText");if(dt)dt.value="";updBtn()}}).catch(function(e){$("dzErr").textContent=e.message});
+  dz.ondrop=function(e){e.preventDefault();dz.classList.remove("dragover");if(e.dataTransfer.files.length)up(e.dataTransfer.files[0])};
+  fi.onchange=function(){if(fi.files.length)up(fi.files[0]);fi.value=""};
 }
 function renderCol2(){
-  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div><div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(DT.turn1)+'</textarea><div class="tpl-error" id="tplErr"></div></div><button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
+  var promptBlock;
+  if(textMode==="replace"){
+    // Two editable prompts: collage (step 1) and final (step 2). No colour step.
+    promptBlock=''
+      +'<div class="edit-toggle" id="tplTog">Edit prompt for step 1 (variations)</div>'
+      +'<div class="edit-body" id="tplBody"><textarea id="tplRC">'+esc(DT.replace_collage||"")+'</textarea><div class="tpl-error" id="tplErr"></div></div>'
+      +'<div class="edit-toggle" id="tplTog2">Edit prompt for step 2 (final)</div>'
+      +'<div class="edit-body" id="tplBody2"><textarea id="tplRF">'+esc(DT.replace_final||"")+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
+  }else{
+    promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(DT.turn1||"")+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
+  }
+  col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div>'+promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
   $("cn").oninput=updBtn;$("ti").oninput=updBtn;
   $("tplTog").onclick=function(){$("tplTog").classList.toggle("open");$("tplBody").classList.toggle("open")};
+  var t2=$("tplTog2");if(t2)t2.onclick=function(){t2.classList.toggle("open");$("tplBody2").classList.toggle("open")};
   $("genBtn").onclick=submitJob;
   checkStatus();
 }
 function updBtn(){
   var btn=$("genBtn"),blk=$("blkMsg");if(!btn){updMockupBtn();updArtworkBtn();return}
   var dt=$("designText"),cn=$("cn"),ti=$("ti");
-  var hasInput=(dt&&dt.value.trim())||textImageFile;
+  var hasInput;
+  if(textMode==="replace"){hasInput=replaceImageFile&&(replaceNewText||"").trim()}
+  else if(textMode==="from_image"){hasInput=textImageFile}
+  else{hasInput=(dt&&dt.value.trim())||(currentTypedText||"").trim()}
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
   btn.disabled=!hasInput||!hasDetails||blocked;
   if(blk){if(!workerAlive)blk.textContent="No agent running. Start the agent on your PC to generate.";else if(!isLoggedIn)blk.textContent="Agent connected but not signed in to ChatGPT. Open the agent window on your PC and click Sign in to ChatGPT.";else if(activeJobId)blk.textContent=myJobBlockMsg("A job is waiting for the client\u2019s choice. Cancel it or complete it to start a new one.");else blk.textContent=""}
 }
 function submitJob(){
-  var tpl1=$("tpl1"),err=$("tplErr");
-  if(tpl1&&tpl1.value.trim()&&tpl1.value.indexOf("{text}")<0){if(err)err.textContent="Must contain {text}";return}
-  if(err)err.textContent="";
-  var body={workflow:"text",text:($("designText")||{}).value||"",text_image:textImageFile,client:$("cn").value.trim(),task_id:$("ti").value.trim(),files:[],options:[],params:{},custom_note:"",template_turn1:tpl1?tpl1.value:""};
+  var body={workflow:"text",text_mode:textMode,client:$("cn").value.trim(),task_id:$("ti").value.trim(),files:[],options:[],params:{},custom_note:""};
+  if(textMode==="replace"){
+    var rc=$("tplRC"),rf=$("tplRF"),err=$("tplErr"),err2=$("tplErr2");
+    if(err)err.textContent="";if(err2)err2.textContent="";
+    if(rc&&rc.value.trim()&&(rc.value.indexOf("{new_text}")<0||rc.value.indexOf("{target_clause}")<0)){if(err)err.textContent="Must contain {new_text} and {target_clause}";return}
+    if(rf&&rf.value.trim()&&rf.value.indexOf("{n}")<0){if(err2)err2.textContent="Must contain {n}";return}
+    body.replace_image=replaceImageFile;
+    body.replace_new_text=(replaceNewText||"").trim();
+    body.replace_target=(replaceTargetText||"").trim();
+    body.template_replace_collage=rc?rc.value:"";
+    body.template_replace_final=rf?rf.value:"";
+  }else{
+    var tpl1=$("tpl1"),errT=$("tplErr");
+    if(tpl1&&tpl1.value.trim()&&tpl1.value.indexOf("{text}")<0){if(errT)errT.textContent="Must contain {text}";return}
+    if(errT)errT.textContent="";
+    body.text=textMode==="typed"?((currentTypedText||($("designText")||{}).value)||""):"";
+    body.text_image=textMode==="from_image"?textImageFile:"";
+    body.template_turn1=tpl1?tpl1.value:"";
+  }
   $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
   fetch("/api/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){if(!r.ok)return r.json().then(function(d){throw new Error(d.detail)});return r.json()}).then(function(d){saveActiveJob(d.job_id);pollJob(d.job_id)}).catch(function(e){statusArea.innerHTML='<div class="status-box failed">'+esc(e.message)+'</div>';$("genBtn").disabled=false});
 }
@@ -369,6 +433,7 @@ function render(job){
     if(job.workflow==="mockup")resultArea.innerHTML=renderMockupResults(job);
     else if(job.workflow==="artwork")resultArea.innerHTML=renderArtworkResults(job);
     else if(job.workflow==="custom")resultArea.innerHTML=renderCustomResults(job);
+    else if(job.workflow==="text"&&job.text_mode==="replace")resultArea.innerHTML=renderReplaceResults(job);
     else resultArea.innerHTML=renderStages(job);
     clearActiveJob();updBtn();addHist(job);
   }else if(job.status==="failed"||job.status==="cancelled"){
@@ -381,9 +446,21 @@ function render(job){
 
 function renderAwaiting(job){
   var si=job.stage_images||{},stage=job.stage||1;
-  var stageKey=stage===1?"stage1":"stage2";
   var choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  // "Replace text in a design": a single collage of variations, then the final.
+  // No colour stage and no next-step colour prompt to edit.
+  if(job.text_mode==="replace"){
+    if(!si.stage1){html+='<div class="status-box failed">Error: The variations image could not be loaded.</div>'+cancelHtml(job);return html}
+    html+=stageBlock("Variations \u2014 same design, new wording",job.id,"stage1",prompts,0,false);
+    html+='<div class="selection-area"><p>Which variation number did the client choose?</p><div class="choice-btns">';
+    for(var r=1;r<=8;r++)html+='<button class="choice-btn" data-action="select" data-job="'+job.id+'" data-choice="'+r+'">'+r+'</button>';
+    html+='<button class="regen-btn" data-action="regenerate" data-job="'+job.id+'">None of these \u2014 regenerate</button></div>';
+    html+='<div class="wait-elapsed">Waiting: <span id="pauseEl">0:00</span></div>';
+    html+=cancelHtml(job)+'</div>';
+    return html;
+  }
+  var stageKey=stage===1?"stage1":"stage2";
   if(stage===2&&si.stage1){html+=stageBlock("Step 1 \u2014 Style variations \u2014 chosen: #"+(choices[0]||"?"),job.id,"stage1",prompts,hasT0,false)}
   if(!si[stageKey]){html+='<div class="status-box failed">Error: The collage image could not be loaded.</div>'+cancelHtml(job);return html}
   var title=stage===1?"Step 1 \u2014 Style variations":"Step 2 \u2014 Colour variations";
@@ -1157,13 +1234,13 @@ function _simReading(shape,detail){
   if(shape>=HI&&detail>=HI)return"Closely matches the original";
   return"Some differences \u2014 review before sending";
 }
-function _renderSimilarity(sim){
+function _renderSimilarity(sim,heading){
   var shape=(sim.shape_pct!==undefined)?sim.shape_pct:sim.similarity_pct;
   var detail=(sim.detail_pct!==undefined)?sim.detail_pct:sim.similarity_pct;
   var edges=(sim.edges_pct!==undefined)?sim.edges_pct:null;
   var colour=(sim.colour_pct!==undefined)?sim.colour_pct:null;
   var h='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px">';
-  h+='<div style="font-size:.7rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px">Compared against the cleaned baseline</div>';
+  h+='<div style="font-size:.7rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px">'+esc(heading||"Compared against the cleaned baseline")+'</div>';
   h+='<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">'+esc(_simReading(shape,detail))+'</div>';
   h+=_simBar("Shape \u2014 proportions & layout",shape);
   if(edges!==null)h+=_simBar("Edges \u2014 outline & structure",edges);
@@ -1313,6 +1390,29 @@ function renderCustomResults(job){
   return html;
 }
 
+function renderReplaceResults(job){
+  // "Replace text in a design": show the SOURCE design and the FINAL side by
+  // side, with the source-vs-final similarity underneath — preserving the
+  // artwork is the whole point, so the operator must see how far it drifted.
+  var si=job.stage_images||{};
+  var srcUrl=job.replace_image?("/input/"+job.replace_image):"";
+  var finalUrl=si.final?("/api/jobs/"+job.id+"/stage/final.png"):"";
+  var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  if(job.replace_new_text)html+='<div style="font-size:.8rem;margin-bottom:8px">New wording: <b>'+esc(job.replace_new_text)+'</b>'+(job.replace_target?' <span style="color:var(--muted)">(replacing "'+esc(job.replace_target)+'")</span>':'')+'</div>';
+  html+='<div style="display:flex;gap:10px;margin-bottom:8px">';
+  html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Original design</div>'+(srcUrl?'<a href="'+srcUrl+'" target="_blank"><img src="'+srcUrl+'" style="max-width:100%;max-height:220px;object-fit:contain;border-radius:6px;border:1px solid var(--border)"></a>':'<span style="color:var(--muted);font-size:.76rem">n/a</span>')+'</div>';
+  html+='<div style="flex:1;text-align:center"><div style="font-size:.68rem;color:var(--muted);margin-bottom:3px">Final (new wording)</div>'+(finalUrl?'<a href="'+finalUrl+'" target="_blank"><img src="'+finalUrl+'" style="max-width:100%;max-height:220px;object-fit:contain;border-radius:6px;border:1px solid var(--border);background:repeating-conic-gradient(#f0f0f0 0% 25%,#fff 0% 50%) 50%/12px 12px"></a>':'<span style="color:var(--muted);font-size:.76rem">n/a</span>')+'</div>';
+  html+='</div>';
+  if(finalUrl){html+='<a class="dl-btn" href="'+finalUrl+'" download="'+esc(job.task_id||"final")+'.png">Download to send to client</a>'+vaultBtn(si.final,job.client,job.task_id)}
+  // Similarity: how far the artwork drifted from the original.
+  if(job.replace_similarity){html+=_renderSimilarity(job.replace_similarity,"Compared against the original design")}
+  // Keep the editable prompt disclosure on BOTH steps.
+  var prompts=job.prompts||[];
+  if(prompts.length>=1){var pc="pt_rc_"+Math.random().toString(36).slice(2,6);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pc+'">Prompt used \u2014 step 1 (variations)</div><div class="prompt-content" id="'+pc+'">'+esc(prompts[0])+'</div>'}
+  if(prompts.length>=2){var pf="pt_rf_"+Math.random().toString(36).slice(2,6);html+='<div class="prompt-toggle" data-action="toggle" data-target="'+pf+'">Prompt used \u2014 step 2 (final)</div><div class="prompt-content" id="'+pf+'">'+esc(prompts[prompts.length-1])+'</div>'}
+  if(job.vault_folder){html+='<div class="vault-info">Saved to:<br><code>'+esc(job.vault_folder)+'</code><br><button class="vault-btn" data-action="open-folder" data-path="'+esc(job.vault_folder)+'">Open folder</button></div>'}
+  return html;
+}
 function renderMockupResults(job){
   var fn=job.final_names||[],si=job.stage_images||{};
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';

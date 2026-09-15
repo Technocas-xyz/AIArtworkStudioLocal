@@ -44,6 +44,32 @@ Requirements:
 - Flat solid colours exactly as shown in that variation
 - Centred with even margins"""
 
+# --- Text workflow, "Replace text in a design" mode ------------------------
+# Two turns only (collage -> final). There is NO colour stage: the design's
+# colours already exist and must be preserved. {target_clause} is built in code
+# (see agent.py) from the optional "text to replace" field.
+TEXT_REPLACE_COLLAGE = """This image is a finished design. Recreate it with the wording changed to "{new_text}".
+
+Requirements:
+- Keep the design identical in every other respect: layout, illustration style, colours, decorative elements, background treatment and composition
+- Replace only the wording. {target_clause}
+- Match the original typography as closely as possible - same style, weight and character of lettering
+- Produce 8 variations showing different ways the new wording can sit in the design: spacing, scale, slight positioning and lettering treatment
+- Arrange all 8 into ONE collage on a plain white background in a 4 wide x 2 tall grid
+- Number each variation 1 to 8, placed below it, outside the artwork
+- Return only that one collage image"""
+
+TEXT_REPLACE_FINAL = """Generate variation number {n} as a single final artwork.
+
+Requirements:
+- That variation only, nothing else in the frame
+- Keep the design and the new wording exactly as shown in that variation
+- Transparent background, PNG
+- No numbering, no border
+- Centred with even margins
+- Clean sharp edges suitable for DTF garment printing"""
+
+
 MOCKUP_REGENERATE = """Regenerate this artwork as a clean final version suitable for DTF garment printing.
 
 Requirements:

@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 # --- Shared, UNCHANGED library code (same modules the server used) ---
 from config.workflows import (
     TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3,
+    TEXT_REPLACE_COLLAGE, TEXT_REPLACE_FINAL,
     EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE,
     CUSTOM_RECONSTRUCT, CUSTOM_REMOVE_BACKGROUND, CUSTOM_HALO_REMOVAL,
     CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR,
@@ -501,6 +502,102 @@ def _run_legacy_job(page: Any, job: dict[str, Any]) -> None:
         raise
 
 
+def _run_text_replace(page: Any, job: dict[str, Any], run_dir, run_number: int) -> None:
+    """Text workflow, "Replace text in a design" mode.
+
+    Two turns, no colour stage — the design's colours already exist and must be
+    preserved:
+        Turn 1 -> collage of 8 variations of the SAME design with the new text
+        PAUSE  -> operator enters the client's choice
+        Turn 2 -> that variation as a single final artwork
+    The chat already opened in _run_text_workflow before this was called.
+    """
+    job_id = job["id"]
+    task_id = job["task_id"]
+    design_image = (job.get("replace_image") or "").strip()
+    new_text = (job.get("replace_new_text") or "").strip()
+    target = (job.get("replace_target") or "").strip()
+
+    # target_clause: name the wording to replace, or say replace all of it.
+    if target:
+        target_clause = f'Replace only the wording that currently reads "{target}".'
+    else:
+        target_clause = "Replace all the wording in the design."
+
+    tpl_collage = job.get("template_replace_collage") or TEXT_REPLACE_COLLAGE
+    tpl_final = job.get("template_replace_final") or TEXT_REPLACE_FINAL
+    design_path = str(INPUT_DIR / design_image)
+
+    # --- TURN 1: collage of 8 variations of the same design with the new text ---
+    job["stage"] = 1
+    job["stage_label"] = "Generating text-replacement variations"
+    attempt = 1
+    while True:
+        prompt1 = tpl_collage.format(new_text=new_text, target_clause=target_clause)
+        job.setdefault("prompts", []).append(prompt1)
+        _track_start(job)
+        images1 = send_turn(page, prompt=prompt1, image_paths=[design_path],
+                            run_id=f"{job_id}_replace_collage_{attempt}")
+        _track_end(job)
+        _rename_chat_once(page, job)
+
+        if images1:
+            suffix = f"_attempt{attempt}" if attempt > 1 else ""
+            variations_output = f"{job_id}_variations{suffix}.png"
+            _record_stage_image(
+                job, "stage1", images1[0], variations_output,
+                vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_variations{suffix}.png")
+
+        # PAUSE: operator enters the client's chosen variation number.
+        job["stage"] = 1
+        job["awaiting_input"] = True
+        job["paused_at"] = time.time()
+        job["status"] = "awaiting_selection"
+        _wait_for_resume(job_id)
+
+        # A regenerate request re-runs the collage with an (optionally) edited prompt.
+        if job.get("_regenerate"):
+            job["_regenerate"] = False
+            tpl_collage = job.get("_regen_template") or tpl_collage
+            job["_regen_template"] = None
+            attempt += 1
+            job["status"] = "running"
+            job["awaiting_input"] = False
+            job["stage_label"] = f"Regenerating variations (attempt {attempt})"
+            continue
+        break
+
+    # --- TURN 2: the chosen variation as a single final artwork ---
+    job["status"] = "running"
+    job["awaiting_input"] = False
+    job["stage"] = 2
+    job["stage_label"] = "Generating final artwork"
+    if not job.get("choices"):
+        raise RuntimeError("No variation number was received from the operator (choices is empty) before the final step.")
+    choice = job["choices"][-1]
+    tpl_final = job.get("template_replace_final") or tpl_final
+
+    prompt2 = tpl_final.format(n=choice)
+    print(f"[text-replace] Final prompt (n={choice}):\n{prompt2}")
+    job.setdefault("prompts", []).append(prompt2)
+    _track_start(job)
+    images2 = send_turn(page, prompt=prompt2, image_paths=None, run_id=f"{job_id}_replace_final")
+    _track_end(job)
+
+    if images2:
+        final_data = images2[0]
+        if is_opaque_white_bg(final_data):
+            final_data = remove_white_background(final_data)
+        final_output = f"{job_id}_final.png"
+        _record_stage_image(
+            job, "final", final_data, final_output,
+            vault_dir=run_dir, vault_name=f"{task_id}_R{run_number}_final.png")
+
+    job["status"] = "done"
+    job["awaiting_input"] = False
+    job["finished_at"] = time.time()
+
+
 def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     job_id = job["id"]
     client = job["client"]
@@ -524,6 +621,13 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     _track_start(job)
     _open_chat_for(page, job)
     _track_end(job)
+
+    # --- Third input mode: "Replace text in a design" -------------------------
+    # Two turns only (collage -> final). No colour stage: the design's colours
+    # already exist and must be preserved. Handled entirely here, then return.
+    if job.get("text_mode") == "replace":
+        _run_text_replace(page, job, run_dir, run_number)
+        return
 
     # --- TURN 0 (optional): Extract text from image ---
     if text_image and not text:

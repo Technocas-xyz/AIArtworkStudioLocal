@@ -30,7 +30,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from config.agent_version import AGENT_CODE_VERSION
 from config.job_options import JOB_OPTIONS, PARAMETERISED_OPTIONS
-from config.workflows import TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_OPERATIONS
+from config.workflows import TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3, TEXT_REPLACE_COLLAGE, TEXT_REPLACE_FINAL, EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE, CUSTOM_OPERATIONS
 from src.aspect import image_info
 from src.auth import (
     APP_USERNAME, APP_PASSWORD_HASH, verify_password, sign_cookie,
@@ -215,6 +215,14 @@ class GenerateRequest(BaseModel):
     text: str = ""
     text_image: str = ""
     template_turn1: str = ""
+    # Text workflow input mode: "typed" (default), "from_image", or "replace".
+    text_mode: str = "typed"
+    # "replace" mode: recreate an uploaded design with new wording.
+    replace_image: str = ""       # the finished design to recreate
+    replace_new_text: str = ""    # the wording it should say instead
+    replace_target: str = ""      # optional: which wording to replace (blank = all)
+    template_replace_collage: str = ""  # operator-editable collage prompt
+    template_replace_final: str = ""    # operator-editable final prompt
     # Mockup workflow fields
     mockup_image: str = ""
     extract_mode: str = "auto"  # "grid" or "auto"
@@ -482,7 +490,9 @@ def list_options():
 def get_templates():
     # NOTE: custom operations are served via /api/custom-operations with their templates embedded.
     # TODO: Migrate text/extraction/artwork templates to the same single-sourced pattern.
-    return {"turn1": TEXT_TURN_1, "turn2": TEXT_TURN_2, "turn3": TEXT_TURN_3, "extract": EXTRACT_CONTACT_SHEET, "regen": EXTRACT_SINGLE, "artwork_regen": ARTWORK_REGENERATE, "artwork": ARTWORK_REGENERATE}
+    return {"turn1": TEXT_TURN_1, "turn2": TEXT_TURN_2, "turn3": TEXT_TURN_3,
+            "replace_collage": TEXT_REPLACE_COLLAGE, "replace_final": TEXT_REPLACE_FINAL,
+            "extract": EXTRACT_CONTACT_SHEET, "regen": EXTRACT_SINGLE, "artwork_regen": ARTWORK_REGENERATE, "artwork": ARTWORK_REGENERATE}
 
 
 @app.get("/api/custom-operations")
@@ -524,11 +534,24 @@ def create_job(req: GenerateRequest):
         raise HTTPException(status_code=409, detail="All agents are busy. Wait for one to finish, or start another agent.")
 
     if req.workflow == "text":
-        if not req.text.strip() and not req.text_image.strip():
-            raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
-        t1 = req.template_turn1.strip() if req.template_turn1.strip() else TEXT_TURN_1
-        if "{text}" not in t1:
-            raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
+        if req.text_mode == "replace":
+            # Replace-text-in-a-design: needs the design image and the new wording.
+            if not req.replace_image.strip():
+                raise HTTPException(status_code=400, detail="Upload the design image to replace text in.")
+            if not req.replace_new_text.strip():
+                raise HTTPException(status_code=400, detail="Enter the replacement text.")
+            c1 = req.template_replace_collage.strip() or TEXT_REPLACE_COLLAGE
+            if "{new_text}" not in c1 or "{target_clause}" not in c1:
+                raise HTTPException(status_code=400, detail="Collage prompt must contain {new_text} and {target_clause} placeholders.")
+            f1 = req.template_replace_final.strip() or TEXT_REPLACE_FINAL
+            if "{n}" not in f1:
+                raise HTTPException(status_code=400, detail="Final prompt must contain the {n} placeholder.")
+        else:
+            if not req.text.strip() and not req.text_image.strip():
+                raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
+            t1 = req.template_turn1.strip() if req.template_turn1.strip() else TEXT_TURN_1
+            if "{text}" not in t1:
+                raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
     elif req.workflow == "mockup":
         if not req.mockup_image.strip():
             raise HTTPException(status_code=400, detail="Upload a mockup image first.")
@@ -563,6 +586,14 @@ def create_job(req: GenerateRequest):
         "extracted_text": "", "confirmed_text": "", "paused_at": None,
         "template_turn1": req.template_turn1.strip(),
         "template_turn2": "", "template_turn3": "",
+        # Text input mode + "replace text in a design" fields.
+        "text_mode": (req.text_mode or "typed").strip(),
+        "replace_image": req.replace_image.strip(),
+        "replace_new_text": req.replace_new_text.strip(),
+        "replace_target": req.replace_target.strip(),
+        "template_replace_collage": req.template_replace_collage.strip(),
+        "template_replace_final": req.template_replace_final.strip(),
+        "replace_similarity": None,   # source-vs-final, computed on result upload
         "template_extract": req.template_extract.strip() if hasattr(req, 'template_extract') else "",
         "template_regen": req.template_regen.strip() if hasattr(req, 'template_regen') else "",
         "active_time": 0.0,
@@ -1289,7 +1320,7 @@ def agent_next_job(request: Request, agent_id: str, logged_in: bool = False):
     input_files = []
     for key in ("files", "artwork_files"):
         input_files += [f for f in job.get(key, []) if f]
-    for key in ("text_image", "mockup_image"):
+    for key in ("text_image", "mockup_image", "replace_image"):
         v = job.get(key)
         if v:
             input_files.append(v)
@@ -1370,6 +1401,7 @@ async def agent_result(job_id: str, request: Request):
     job["last_progress_at"] = time.time()
     _heartbeat(job.get("claimed_by"))
     _recompute_aspect_similarity(job)
+    _recompute_replace_similarity(job)
     return {"ok": True, "saved": saved}
 
 
@@ -1404,6 +1436,33 @@ def _recompute_aspect_similarity(job: dict) -> None:
               f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')}")
     except Exception as exc:
         print(f"[server] aspect similarity computation failed: {exc}")
+
+
+def _recompute_replace_similarity(job: dict) -> None:
+    """For a 'replace text in a design' job, compare the SOURCE design against
+    the FINAL artwork so the operator can see how far the design drifted —
+    preserving it is the whole point of this mode. Source is the uploaded input
+    file; final is the recorded stage image. Runs server-side where cv2 lives."""
+    if job.get("text_mode") != "replace":
+        return
+    if job.get("replace_similarity"):  # already computed
+        return
+    source = (job.get("replace_image") or "").strip()
+    final = (job.get("stage_images") or {}).get("final")
+    if not source or not final:
+        return
+    s_path = INPUT_DIR / Path(source).name
+    f_path = OUTPUT_DIR / Path(final).name
+    if not (s_path.exists() and f_path.exists()):
+        return
+    try:
+        from src.compare import similarity as _similarity
+        sim = _similarity(s_path.read_bytes(), f_path.read_bytes())
+        job["replace_similarity"] = sim
+        print(f"[server] computed replace similarity for job {job['id']}: "
+              f"shape={sim.get('shape_pct')} detail={sim.get('detail_pct')}")
+    except Exception as exc:
+        print(f"[server] replace similarity computation failed: {exc}")
 
 
 @app.post("/api/agent/job/{job_id}/error")
