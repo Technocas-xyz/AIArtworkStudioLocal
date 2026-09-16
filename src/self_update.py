@@ -39,9 +39,18 @@ import requests
 VERSION_FILENAME = "code_version.txt"
 _STAGING_NAME = "code_staging"
 _BACKUP_NAME = "code_backup"
-# What a bundle is allowed to contain / what we swap. Anything else in the live
-# code dir (e.g. a local .env) is left untouched by the swap.
+# The browser profile (saved ChatGPT session) lives here, next to the exe —
+# OUTSIDE code/, code_staging/, code_backup/ and _internal/. It must survive a
+# self-update, so the swap must never see it.
+PROFILES_NAME = "profiles"
+# What a bundle is allowed to contain / what we swap. Anything else next to the
+# code dir (a local .env, and crucially the browser profile) is left untouched.
 _MANAGED_TOPLEVEL = ("agent.py", "agent_gui.py", "src", "config")
+
+# Hard guard: the profile folder must never be swappable. If someone ever adds
+# "profiles" to the managed list, fail loudly at import rather than silently
+# wiping designers' saved sessions on the next update.
+assert PROFILES_NAME not in _MANAGED_TOPLEVEL, "profiles must never be self-update-managed"
 
 
 class UpdateStatus:
@@ -102,6 +111,24 @@ def code_dir() -> Path:
         d.mkdir(parents=True, exist_ok=True)
         return d
     return app_dir()
+
+
+def profiles_root() -> Path:
+    """Fixed, writable root for browser profiles, as an ABSOLUTE path derived
+    from the app directory — never relative to the current working directory.
+
+    It sits next to the executable (frozen) or the project root (source),
+    OUTSIDE code/ and _internal/, so a self-update swap can never take the saved
+    ChatGPT session with it."""
+    return (app_dir() / PROFILES_NAME).resolve()
+
+
+def profile_dir(account: str) -> Path:
+    """Absolute per-account browser profile directory. Created if missing."""
+    safe = "".join(c for c in (account or "acct1") if c.isalnum() or c in ("-", "_")) or "acct1"
+    d = profiles_root() / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _version_file() -> Path:

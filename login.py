@@ -13,8 +13,12 @@ does not open a browser at all any more, so it can keep running.
 import sys
 from playwright.sync_api import sync_playwright
 
+from src.self_update import profile_dir
+
 account = sys.argv[1] if len(sys.argv) > 1 else "acct1"
-profile = f"./profiles/{account}"
+# Same absolute, app-relative profile the agent uses, so the session signed in
+# here is exactly the one the agent reuses (and it survives updates).
+profile = str(profile_dir(account))
 
 print()
 print("=" * 60)

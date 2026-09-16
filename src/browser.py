@@ -5,6 +5,7 @@ from __future__ import annotations
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from config.selectors import PROMPT_BOX
+from src.self_update import profile_dir
 
 
 # ---------------------------------------------------------------------------
@@ -54,10 +55,15 @@ def launch_context(account: str) -> BrowserContext:
     ProfileLockedError
         If the profile directory is already in use by another Chromium instance.
     """
+    # Absolute, fixed profile path derived from the app directory (never
+    # relative to the CWD, never inside the self-update-swapped code/ folder),
+    # so the saved ChatGPT session persists across restarts AND updates.
+    profile_path = profile_dir(account)
+    print(f"[agent] using browser profile {profile_path}")
     try:
         pw = sync_playwright().start()
         context: BrowserContext = pw.chromium.launch_persistent_context(
-            user_data_dir=f"./profiles/{account}",
+            user_data_dir=str(profile_path),
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
@@ -70,7 +76,7 @@ def launch_context(account: str) -> BrowserContext:
         msg = str(exc).lower()
         if "already in use" in msg or "existing browser session" in msg or "lock" in msg:
             raise ProfileLockedError(
-                f"Profile './profiles/{account}' is already in use by another Chromium instance. "
+                f"Profile '{profile_path}' is already in use by another Chromium instance. "
                 "Close any open automation browser windows and try again."
             ) from exc
         raise
