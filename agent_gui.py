@@ -250,7 +250,13 @@ class AgentGUI:
             try:
                 if agent.self_update.has_staged_update():
                     self._events.put(("log", "Applying staged update before start…"))
-                    agent.apply_pending_update()  # re-execs on success
+                    res = agent.apply_pending_update()  # re-execs on success; returns dict on failure
+                    # If we're still here, the apply did NOT re-exec — surface why
+                    # rather than starting silently on the old code.
+                    if isinstance(res, dict) and res.get("error"):
+                        self._events.put(("log", f"staged update did not apply: {res.get('error')}"))
+                        self._events.put(("update", {"reason": "error", "error":
+                            "A downloaded update could not be applied — still on the current version. " + str(res.get("error"))}))
             except Exception as exc:
                 self._events.put(("log", f"startup update skipped: {exc}"))
 
