@@ -31,6 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -129,6 +130,29 @@ def profile_dir(account: str) -> Path:
     d = profiles_root() / safe
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ---------------------------------------------------------------------------
+# Logging — a self-update that fails on a packaged agent must leave a trace a
+# designer (who has no terminal) can read. Every step prints AND appends to
+# <app>/update.log so a stuck update can be diagnosed after the fact.
+# ---------------------------------------------------------------------------
+
+def _log_file() -> Path:
+    return app_dir() / "update.log"
+
+
+def log(msg: str) -> None:
+    line = f"[update] {msg}"
+    try:
+        print(line)
+    except Exception:
+        pass
+    try:
+        with open(_log_file(), "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except Exception:
+        pass
 
 
 def _version_file() -> Path:
@@ -244,11 +268,18 @@ def _download_bundle(server_url: str, token: str, dest_zip: Path, timeout: float
 def _validate_bundle(staging: Path) -> None:
     """Refuse to apply a bundle that is missing the essentials — a truncated or
     wrong download must never overwrite good code."""
+    missing = []
     for essential in ("agent.py", "agent_gui.py"):
         if not (staging / essential).is_file():
-            raise RuntimeError(f"bundle missing {essential}; refusing to apply")
-    if not (staging / "src").is_dir() or not (staging / "config").is_dir():
-        raise RuntimeError("bundle missing src/ or config/; refusing to apply")
+            missing.append(essential)
+    for d in ("src", "config"):
+        if not (staging / d).is_dir():
+            missing.append(d + "/")
+    if missing:
+        # List what IS there, to make a layout mismatch obvious in the log.
+        present = sorted(p.name for p in staging.iterdir()) if staging.is_dir() else []
+        raise RuntimeError(
+            f"bundle missing {missing}; refusing to apply. staging contains: {present}")
 
 
 def stage_update(server_url: str, token: str, version: str) -> Path:
@@ -283,71 +314,127 @@ def write_version_into(folder: Path, version: str) -> None:
         pass
 
 
+def _force_rmtree(path: Path) -> None:
+    """rmtree that copes with Windows read-only bits on git/pyc files."""
+    def _onerror(func, p, _exc):
+        try:
+            os.chmod(p, 0o777)
+            func(p)
+        except Exception:
+            pass
+    if path.exists():
+        shutil.rmtree(path, onerror=_onerror)
+
+
 def apply_staged(staging: Path | None = None) -> None:
     """Swap the staged code over the live code dir, keeping a backup.
 
-    Only the managed top-level entries are replaced; unrelated files in the code
-    dir (local config, the version file we then rewrite) are preserved. On any
-    error the backup is restored so the agent keeps its old, working code."""
+    Windows-safe: the live process imports agent/agent_gui/src/config FROM the
+    code dir, so those files can be locked/in-use. We therefore swap by RENAME
+    (move the old entry aside, move the new one in) instead of deleting the live
+    tree in place — a rename of a directory succeeds even when its files are
+    open for reading, whereas rmtree-in-place fails with PermissionError. That
+    silent PermissionError is what left agents stuck on baseline code.
+
+    Every step is logged (and written to <app>/update.log). On any failure the
+    backup is restored and the reason is raised so the GUI can surface it.
+    Only the managed top-level entries are touched; profiles/, .env, etc. are
+    left alone. The version file is written LAST, only after a clean swap, so a
+    present code/code_version.txt reliably means "fully applied"."""
     staging = staging or (app_dir() / _STAGING_NAME)
     if not staging.is_dir():
-        raise RuntimeError("no staged update to apply")
+        raise RuntimeError(f"no staged update to apply at {staging}")
+    log(f"apply: staging found at {staging}")
     _validate_bundle(staging)
+    log("apply: bundle validated (agent.py, agent_gui.py, src/, config/ present)")
 
     live = code_dir()
+    live.mkdir(parents=True, exist_ok=True)
     backup = app_dir() / _BACKUP_NAME
-    if backup.exists():
-        shutil.rmtree(backup, ignore_errors=True)
+    _force_rmtree(backup)
     backup.mkdir(parents=True, exist_ok=True)
+    log(f"apply: backup dir ready at {backup}")
 
-    replaced: list[str] = []
+    staged_ver = ""
+    vf = staging / VERSION_FILENAME
+    if vf.is_file():
+        try:
+            staged_ver = vf.read_text(encoding="utf-8").strip()
+        except Exception:
+            staged_ver = ""
+
+    moved: list[str] = []   # names whose live copy we renamed into backup
+    placed: list[str] = []  # names whose staged copy we moved into live
     try:
         for name in _MANAGED_TOPLEVEL:
             src = staging / name
             if not src.exists():
+                log(f"apply: staging has no '{name}', skipping")
                 continue
             dst = live / name
-            # Back up the current version of this entry.
+            # 1) Move the current live entry aside into backup (rename = atomic,
+            #    survives files being open for reading on Windows).
             if dst.exists():
-                bdst = backup / name
-                if dst.is_dir():
-                    shutil.copytree(dst, bdst)
-                else:
-                    shutil.copy2(dst, bdst)
-                # Remove the live copy before writing the new one.
-                if dst.is_dir():
-                    shutil.rmtree(dst)
-                else:
-                    dst.unlink()
-            # Move the staged entry into place.
-            shutil.move(str(src), str(dst))
-            replaced.append(name)
-        # Record the new version alongside the code.
-        staged_ver = (staging / VERSION_FILENAME)
-        if staged_ver.is_file():
-            (live / VERSION_FILENAME).write_text(
-                staged_ver.read_text(encoding="utf-8").strip(), encoding="utf-8")
+                os.replace(str(dst), str(backup / name)) if dst.is_file() else _move_dir(dst, backup / name)
+                moved.append(name)
+                log(f"apply: moved existing code/{name} -> backup")
+            # 2) Move the staged entry into place.
+            _move_dir(src, dst) if src.is_dir() else os.replace(str(src), str(dst))
+            placed.append(name)
+            log(f"apply: placed new code/{name}")
+
+        log(f"apply: swap finished ({len(placed)} entr{'y' if len(placed)==1 else 'ies'}: {placed})")
+
+        # 3) Write the version LAST — this is what the next check compares.
+        if staged_ver:
+            (live / VERSION_FILENAME).write_text(staged_ver, encoding="utf-8")
+            log(f"apply: wrote code/{VERSION_FILENAME} = {staged_ver}")
+        else:
+            log("apply: WARNING staging had no version file; code version not updated")
     except Exception as exc:
-        # Roll back everything we touched from the backup, best-effort.
-        for name in replaced:
-            try:
-                dst = live / name
-                if dst.exists():
-                    if dst.is_dir():
-                        shutil.rmtree(dst, ignore_errors=True)
-                    else:
-                        dst.unlink()
-                bsrc = backup / name
-                if bsrc.exists():
-                    if bsrc.is_dir():
-                        shutil.copytree(bsrc, dst)
-                    else:
-                        shutil.copy2(bsrc, dst)
-            except Exception:
-                pass
+        log(f"apply: FAILED at swap: {exc}\n{traceback.format_exc()}")
+        # Roll back: remove anything we placed, restore anything we moved aside.
+        for name in placed:
+            _force_rmtree(live / name) if (live / name).is_dir() else _silent_unlink(live / name)
+        for name in moved:
+            b = backup / name
+            if b.exists():
+                try:
+                    _move_dir(b, live / name) if b.is_dir() else os.replace(str(b), str(live / name))
+                except Exception as rexc:
+                    log(f"apply: rollback of {name} failed: {rexc}")
+        log("apply: rolled back to previous code")
         raise RuntimeError(f"apply failed, rolled back to previous code: {exc}")
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        _force_rmtree(staging)
+        log("apply: cleared staging")
+
+
+def _move_dir(src: Path, dst: Path) -> None:
+    """Move directory `src` onto `dst`, replacing dst if present.
+
+    Prefers an atomic same-volume rename; on any failure (e.g. cross-volume, or
+    a locked entry) falls back to copytree + best-effort rmtree. Always ensures
+    dst does not exist before creating it, so a failed rename can't leave a
+    half-state that makes the fallback raise FileExistsError."""
+    if dst.exists():
+        _force_rmtree(dst)
+    try:
+        os.replace(str(src), str(dst))   # atomic on same volume
+        return
+    except OSError:
+        pass
+    # Fallback: copy the tree in, then remove the source. dst was cleared above;
+    # copytree with dirs_exist_ok tolerates any residue from a partial rename.
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    _force_rmtree(src)
+
+
+def _silent_unlink(p: Path) -> None:
+    try:
+        p.unlink()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -389,14 +476,17 @@ def check_and_stage(server_url: str, token: str) -> UpdateStatus:
     if st.error or not st.update_available:
         return st
     try:
+        log(f"check_and_stage: server {st.server_version} > local {st.local_version}; downloading bundle")
         stage_update(server_url, token, st.server_version)
         st.staged = True
         st.reason = "ok"
+        log(f"check_and_stage: staged {st.server_version} into {app_dir() / _STAGING_NAME}")
     except Exception as exc:
         st.staged = False
         # A download/stage failure IS a real problem worth reporting.
         st.reason = "error"
         st.error = f"download/stage failed: {exc}"
+        log(f"check_and_stage: {st.error}")
     return st
 
 
@@ -407,13 +497,18 @@ def apply_if_staged() -> UpdateStatus:
     staging = app_dir() / _STAGING_NAME
     if not staging.is_dir():
         return st  # nothing staged; no-op
+    log(f"apply_if_staged: staged update present (local version {st.local_version}); applying")
     try:
         apply_staged(staging)
         st.applied = True
         st.local_version = read_local_version()
+        st.reason = "ok"
+        log(f"apply_if_staged: applied OK; code version now {st.local_version}")
     except Exception as exc:
         st.applied = False
+        st.reason = "error"
         st.error = str(exc)
+        log(f"apply_if_staged: apply failed: {exc}")
     return st
 
 

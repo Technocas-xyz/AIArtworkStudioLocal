@@ -1592,14 +1592,26 @@ def _apply_and_restart(log=print, status=None) -> bool:
     """Apply a staged update and re-exec. Returns False (and stays on the old,
     working code) if applying fails — a broken update never breaks the agent.
 
+    FROZEN build: the running agent must NOT swap its own live code/ (its .py
+    files are imported and locked on Windows, which is exactly what left agents
+    stuck). Instead we re-exec; the bootstrap applies the staged update before
+    code/ is imported. SOURCE build: no bootstrap, so apply in-process.
+
     Caller MUST ensure no job is running before invoking this."""
+    if not self_update.has_staged_update():
+        return False
+    if self_update.is_frozen():
+        log("[update] staged update present; restarting so the bootstrap applies it…")
+        if status:
+            status("connected", "Updating — restarting…")
+        self_update.restart()   # bootstrap does the swap before code/ is imported
+        return True
+    # Source/dev: apply in-process (code/ is the project root, nothing locked).
     st = self_update.apply_if_staged()
-    if st.error:
+    if st.error or not st.applied:
         log(f"[update] apply failed, staying on current code: {st.error}")
         if status:
             status("error", f"Update failed: {st.error}")
-        return False
-    if not st.applied:
         return False
     log(f"[update] applied code {st.local_version}; restarting…")
     if status:
@@ -1611,8 +1623,14 @@ def _apply_and_restart(log=print, status=None) -> bool:
 def apply_pending_update() -> dict:
     """GUI Restart button entry point: apply a staged update and re-exec.
 
-    Returns a status dict; on failure the agent keeps its current code and the
-    dict carries the error so the GUI can surface it. Never raises."""
+    FROZEN: re-exec and let the bootstrap swap (safe, code/ not yet locked).
+    SOURCE: apply in-process then re-exec. Never raises; on failure returns a
+    dict with the reason so the GUI can surface it."""
+    if not self_update.has_staged_update():
+        return {"applied": False, "error": None, "reason": "up_to_date"}
+    if self_update.is_frozen():
+        self_update.restart()  # does not return on success; bootstrap applies
+        return {"applied": False, "error": "restart did not occur", "reason": "error"}
     st = self_update.apply_if_staged()
     if st.applied and not st.error:
         self_update.restart()  # does not return on success
@@ -1803,8 +1821,14 @@ def _startup_self_update() -> None:
     agent on its current, working code."""
     if not AGENT_TOKEN:
         return
-    # Apply whatever a prior run staged (then it re-execs and never returns).
+    # Apply whatever a prior run staged. Frozen: the bootstrap already applied it
+    # before we got here, so a leftover staging means restart to let it run again;
+    # source: apply in-process.
     if self_update.has_staged_update():
+        if self_update.is_frozen():
+            print("[update] staged update present; restarting so the bootstrap applies it…")
+            self_update.restart()
+            return
         st = self_update.apply_if_staged()
         if st.applied and not st.error:
             print(f"[update] applied staged code {st.local_version}; restarting…")
@@ -1812,7 +1836,7 @@ def _startup_self_update() -> None:
             return
         if st.error:
             print(f"[update] could not apply staged update ({st.error}); on current code.")
-    # Fresh check: stage + apply now if the server is newer.
+    # Fresh check: stage now if the server is newer, then restart so it applies.
     st = self_update.check_and_stage(SERVER_URL, AGENT_TOKEN)
     if st.reason == "not_supported":
         # Older server without self-update endpoints — nothing to do, stay quiet.
@@ -1822,6 +1846,9 @@ def _startup_self_update() -> None:
         return
     if st.staged:
         print(f"[update] new code {st.server_version} staged (current {st.local_version}); applying…")
+        if self_update.is_frozen():
+            self_update.restart()   # bootstrap swaps before code/ is imported
+            return
         ast = self_update.apply_if_staged()
         if ast.applied and not ast.error:
             print("[update] applied; restarting…")
