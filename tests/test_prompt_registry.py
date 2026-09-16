@@ -47,17 +47,17 @@ code_prompts = {n for n, v in vars(W).items() if n.isupper() and isinstance(v, s
 code_prompts |= {"BASE_INSTRUCTION"} | {option_template_name(k) for k in JOB_OPTIONS}
 check("every prompt in the code has a Prompt Management key", code_prompts <= set(PROMPT_KEYS),
       sorted(code_prompts - set(PROMPT_KEYS)))
-check("27 prompts mapped, keys unique", len(PROMPT_KEYS) == 27 and len(set(PROMPT_KEYS.values())) == 27, len(PROMPT_KEYS))
+check("31 prompts mapped, keys unique", len(PROMPT_KEYS) == 31 and len(set(PROMPT_KEYS.values())) == 31, len(PROMPT_KEYS))
 
 # 2. Conversion to Decoinks {{}} text and back is exact for every one of them.
 bad = [n for n in PROMPT_KEYS if to_python_template(from_python_template(_builtin(n))) != _builtin(n)]
-check("round trip {x} <-> {{x}} is byte-identical for all 27", not bad, bad)
+check("round trip {x} <-> {{x}} is byte-identical for all 31", not bad, bad)
 
 # 3. Published text identical to the code -> the automation runs the code's text, from Decoinks.
 same = {PROMPT_KEYS[n]: from_python_template(_builtin(n)) for n in PROMPT_KEYS}
 reg = fake_registry(same)
 served = {n: reg.template(n) for n in PROMPT_KEYS}
-check("all 27 served as managed and identical to the built-in text",
+check("all 31 served as managed and identical to the built-in text",
       all(t == _builtin(n) and m["source"] == "managed" for n, (t, m) in served.items()))
 
 # 4. A version that adds or drops a placeholder is refused.
@@ -79,7 +79,14 @@ t, m = reg3.template("TEXT_TURN_1")
 check("the others are still served from Prompt Management", m["source"] == "managed" and t == W.TEXT_TURN_1, m)
 
 # 5. Which prompts each job uses.
-check("text job", prompt_names_for_job("text") == ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"])
+check("text job without a mode uses every text prompt", prompt_names_for_job("text") ==
+      ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3", "TEXT_REPLACE_COLLAGE", "TEXT_REPLACE_FINAL",
+       "TEXT_IMAGE_ELEMENT_COLLAGE", "TEXT_IMAGE_STYLE_COLLAGE"])
+check("text job, typed", prompt_names_for_job("text", text_mode="typed") == ["TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"])
+check("text job, from image", prompt_names_for_job("text", text_mode="from_image") == ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"])
+check("text job, replace", prompt_names_for_job("text", text_mode="replace") == ["TEXT_REPLACE_COLLAGE", "TEXT_REPLACE_FINAL"])
+check("text job, image element", prompt_names_for_job("text", text_mode="image_element") == ["TEXT_IMAGE_ELEMENT_COLLAGE", "TEXT_TURN_2", "TEXT_TURN_3"])
+check("text job, image style", prompt_names_for_job("text", text_mode="image_style") == ["TEXT_IMAGE_STYLE_COLLAGE", "TEXT_TURN_2", "TEXT_TURN_3"])
 check("custom job", prompt_names_for_job("custom", ["reconstruct", "aspect_ratio"]) ==
       ["CUSTOM_RECONSTRUCT", "CUSTOM_ASPECT_ADVICE", "CUSTOM_ASPECT_BASELINE", "CUSTOM_ASPECT_REGENERATE"])
 check("edit-options job", prompt_names_for_job("", options=["recolour", "text_only"]) ==
