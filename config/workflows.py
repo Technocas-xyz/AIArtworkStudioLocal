@@ -70,6 +70,34 @@ Requirements:
 - Clean sharp edges suitable for DTF garment printing"""
 
 
+# --- Text workflow, "wording with a client-supplied image" modes (UC-3) -----
+# Two ways the reference image is used at stage 1. Turns 2 (colour) and 3
+# (final) reuse TEXT_TURN_2 / TEXT_TURN_3 unchanged — the colour stage and the
+# final are the same regardless of how stage 1 was produced. The reference image
+# is attached on turn 1 only.
+TEXT_IMAGE_ELEMENT_COLLAGE = """Create a single collage image containing 8 different design variations that combine the uploaded image with the wording "{text}".
+
+Requirements:
+- The uploaded image must appear as part of each design. Reproduce it as closely as you can - same subject, same character, same detail
+- Vary how the image and wording are arranged: above, below, behind, wrapped, integrated into the lettering
+- Vary the typography across the 8 so the client has a real choice
+- Arrange them in a 4 wide x 2 tall grid
+- Number each variation 1 to 8, placed directly below it, outside the design
+- Plain white background for the whole collage
+- Designs must be suitable for DTF garment printing: clean edges, no thin fragile strokes, no gradients"""
+
+TEXT_IMAGE_STYLE_COLLAGE = """Create a single collage image containing 8 different text design variations of the wording "{text}", styled after the uploaded image.
+
+Requirements:
+- Take the visual style from the uploaded image: its colour character, texture, era, mood and lettering treatment
+- Do NOT include the uploaded image itself, or any part of its subject matter, in the designs. Only the wording appears
+- Vary the typography across the 8 within that style
+- Arrange them in a 4 wide x 2 tall grid
+- Number each variation 1 to 8, placed directly below it, outside the design
+- Plain white background for the whole collage
+- Designs must be suitable for DTF garment printing: clean edges, no thin fragile strokes, no gradients"""
+
+
 MOCKUP_REGENERATE = """Regenerate this artwork as a clean final version suitable for DTF garment printing.
 
 Requirements:

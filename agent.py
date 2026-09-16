@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from config.workflows import (
     TEXT_TURN_0, TEXT_TURN_1, TEXT_TURN_2, TEXT_TURN_3,
     TEXT_REPLACE_COLLAGE, TEXT_REPLACE_FINAL,
+    TEXT_IMAGE_ELEMENT_COLLAGE, TEXT_IMAGE_STYLE_COLLAGE,
     EXTRACT_CONTACT_SHEET, EXTRACT_SINGLE, ARTWORK_REGENERATE,
     CUSTOM_RECONSTRUCT, CUSTOM_REMOVE_BACKGROUND, CUSTOM_HALO_REMOVAL,
     CUSTOM_BLACK_OUT, CUSTOM_HALF_TONE, CUSTOM_DETECT_OBJECTS, CUSTOM_CHANGE_COLOR,
@@ -619,10 +620,21 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
     task_id = job["task_id"]
     text = job["text"]
     text_image = job.get("text_image", "")
+    text_mode = job.get("text_mode") or "typed"
 
-    tpl_turn1 = job.get("template_turn1") or _tpl(job, "TEXT_TURN_1", TEXT_TURN_1)
+    # Stage-1 template depends on the input mode. The two image modes (UC-3) use
+    # their own collage prompt and attach the reference image on turn 1 only;
+    # turns 2 (colour) and 3 (final) are identical for every mode.
+    if text_mode == "image_element":
+        tpl_turn1 = job.get("template_turn1") or _tpl(job, "TEXT_IMAGE_ELEMENT_COLLAGE", TEXT_IMAGE_ELEMENT_COLLAGE)
+    elif text_mode == "image_style":
+        tpl_turn1 = job.get("template_turn1") or _tpl(job, "TEXT_IMAGE_STYLE_COLLAGE", TEXT_IMAGE_STYLE_COLLAGE)
+    else:
+        tpl_turn1 = job.get("template_turn1") or _tpl(job, "TEXT_TURN_1", TEXT_TURN_1)
     tpl_turn2 = job.get("template_turn2") or _tpl(job, "TEXT_TURN_2", TEXT_TURN_2)
     tpl_turn3 = job.get("template_turn3") or _tpl(job, "TEXT_TURN_3", TEXT_TURN_3)
+    # The reference image (image modes) is uploaded on turn 1 only.
+    reference_image = job.get("reference_image", "") if text_mode in ("image_element", "image_style") else ""
 
     from src.vault import VAULT_DIR
     task_dir = VAULT_DIR / client / task_id
@@ -671,7 +683,10 @@ def _run_text_workflow(page: Any, job: dict[str, Any]) -> None:
         prompt1 = tpl_turn1.format(text=text)
         job.setdefault("prompts", []).append(prompt1)
         _track_start(job)
-        images1 = send_turn(page, prompt=prompt1, image_paths=None, run_id=f"{job_id}_t1_{attempt}")
+        # Image modes attach the client reference on turn 1 only; every other
+        # mode (and every later turn) is a text-only follow-up in the same chat.
+        turn1_images = [str(INPUT_DIR / reference_image)] if reference_image else None
+        images1 = send_turn(page, prompt=prompt1, image_paths=turn1_images, run_id=f"{job_id}_t1_{attempt}")
         _track_end(job)
         _rename_chat_once(page, job)
 

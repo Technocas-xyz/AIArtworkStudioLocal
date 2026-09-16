@@ -221,7 +221,8 @@ class GenerateRequest(BaseModel):
     text: str = ""
     text_image: str = ""
     template_turn1: str = ""
-    # Text workflow input mode: "typed" (default), "from_image", or "replace".
+    # Text workflow input mode: "typed" (default), "from_image", "replace",
+    # "image_element", or "image_style".
     text_mode: str = "typed"
     # "replace" mode: recreate an uploaded design with new wording.
     replace_image: str = ""       # the finished design to recreate
@@ -229,6 +230,9 @@ class GenerateRequest(BaseModel):
     replace_target: str = ""      # optional: which wording to replace (blank = all)
     template_replace_collage: str = ""  # operator-editable collage prompt
     template_replace_final: str = ""    # operator-editable final prompt
+    # "image_element"/"image_style" modes (UC-3): wording plus a reference image
+    # used either as a design element or as a style guide. Uploaded on turn 1.
+    reference_image: str = ""
     # Mockup workflow fields
     mockup_image: str = ""
     extract_mode: str = "auto"  # "grid" or "auto"
@@ -546,6 +550,8 @@ def get_templates():
             "turn3": _live_template("TEXT_TURN_3"),
             "replace_collage": _live_template("TEXT_REPLACE_COLLAGE"),
             "replace_final": _live_template("TEXT_REPLACE_FINAL"),
+            "image_element_collage": _live_template("TEXT_IMAGE_ELEMENT_COLLAGE"),
+            "image_style_collage": _live_template("TEXT_IMAGE_STYLE_COLLAGE"),
             "extract": _live_template("EXTRACT_CONTACT_SHEET"),
             "regen": _live_template("EXTRACT_SINGLE"),
             "artwork_regen": _live_template("ARTWORK_REGENERATE"),
@@ -622,6 +628,16 @@ def create_job(req: GenerateRequest):
             f1 = req.template_replace_final.strip() or _live_template("TEXT_REPLACE_FINAL")
             if "{n}" not in f1:
                 raise HTTPException(status_code=400, detail="Final prompt must contain the {n} placeholder.")
+        elif req.text_mode in ("image_element", "image_style"):
+            # UC-3: wording plus a client reference image. Both required.
+            if not req.reference_image.strip():
+                raise HTTPException(status_code=400, detail="Upload the reference image.")
+            if not req.text.strip():
+                raise HTTPException(status_code=400, detail="Enter the wording for the design.")
+            reg_name = "TEXT_IMAGE_ELEMENT_COLLAGE" if req.text_mode == "image_element" else "TEXT_IMAGE_STYLE_COLLAGE"
+            t1 = req.template_turn1.strip() or _live_template(reg_name)
+            if "{text}" not in t1:
+                raise HTTPException(status_code=400, detail="Step 1 prompt must contain {text} placeholder.")
         else:
             if not req.text.strip() and not req.text_image.strip():
                 raise HTTPException(status_code=400, detail="Enter design text or upload an image containing the text.")
@@ -664,7 +680,15 @@ def create_job(req: GenerateRequest):
             return submitted
         return live[name]
 
-    template_turn1 = _pick("TEXT_TURN_1", req.template_turn1.strip())
+    # Stage-1 template name depends on the text input mode. The image modes
+    # (UC-3) use their own collage prompt at stage 1; typed/from_image use
+    # TEXT_TURN_1. The operator edit (template_turn1) is attributed to whichever
+    # registry name actually runs, so edit-tracking and run reporting are right.
+    _stage1_name = {
+        "image_element": "TEXT_IMAGE_ELEMENT_COLLAGE",
+        "image_style": "TEXT_IMAGE_STYLE_COLLAGE",
+    }.get(req.text_mode, "TEXT_TURN_1")
+    template_turn1 = _pick(_stage1_name, req.template_turn1.strip())
     # "Replace text in a design" prompts are managed like the rest: an operator
     # edit is recorded, otherwise the live/registry version is used.
     template_replace_collage = _pick("TEXT_REPLACE_COLLAGE", req.template_replace_collage.strip())
@@ -710,6 +734,8 @@ def create_job(req: GenerateRequest):
         "template_replace_collage": template_replace_collage,
         "template_replace_final": template_replace_final,
         "replace_similarity": None,   # source-vs-final, computed on result upload
+        # UC-3 "wording with a client-supplied image" reference (turn 1 only).
+        "reference_image": req.reference_image.strip(),
         "active_time": 0.0,
         "_regenerate": False, "_regen_template": None,
         # Mockup fields
@@ -1429,6 +1455,9 @@ def _used_template(job: dict, name: str) -> str:
         "EXTRACT_SINGLE": job.get("template_regen"), "ARTWORK_REGENERATE": job.get("template_regen"),
         "TEXT_REPLACE_COLLAGE": job.get("template_replace_collage"),
         "TEXT_REPLACE_FINAL": job.get("template_replace_final"),
+        # Image modes carry their stage-1 edit in template_turn1.
+        "TEXT_IMAGE_ELEMENT_COLLAGE": job.get("template_turn1"),
+        "TEXT_IMAGE_STYLE_COLLAGE": job.get("template_turn1"),
     }
     by_field.update({name_: custom.get(ui_key) for ui_key, name_ in _CUSTOM_PROMPT_KEYS.items()})
     return by_field.get(name) or (job.get("managed_prompts") or {}).get(name) or ""
@@ -1549,7 +1578,7 @@ def agent_next_job(request: Request, agent_id: str, logged_in: bool = False):
     input_files = []
     for key in ("files", "artwork_files"):
         input_files += [f for f in job.get(key, []) if f]
-    for key in ("text_image", "mockup_image", "replace_image"):
+    for key in ("text_image", "mockup_image", "replace_image", "reference_image"):
         v = job.get(key)
         if v:
             input_files.append(v)

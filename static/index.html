@@ -20,6 +20,8 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .text-input-large{width:100%;padding:12px 14px;font-size:1.1rem;font-weight:600;border:2px solid var(--border);border-radius:var(--radius);text-align:center;margin-bottom:10px}.text-input-large:focus{border-color:var(--accent);outline:none}
 .or-divider{text-align:center;font-size:.78rem;color:var(--muted);margin:8px 0;font-weight:600}
 .tmode-tabs{display:flex;gap:6px;margin-bottom:12px}.tmode-tab{flex:1;padding:8px 6px;font-size:.74rem;font-weight:600;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;transition:.15s;line-height:1.2}.tmode-tab:hover{border-color:#c9c9d4}.tmode-tab.active{border-color:var(--accent);background:#eff6ff;color:var(--accent)}
+/* Stacked mode cards: a bold name plus a one-line description of what it does. */
+.tmode-tabs-stacked{flex-direction:column;gap:8px}.tmode-tabs-stacked .tmode-tab{text-align:left;padding:10px 12px;display:flex;flex-direction:column;gap:2px}.tmode-tabs-stacked .tmode-name{font-size:.86rem;font-weight:700}.tmode-tabs-stacked .tmode-desc{font-size:.74rem;font-weight:400;color:var(--muted)}.tmode-tabs-stacked .tmode-tab.active .tmode-desc{color:var(--accent)}
 .gen-btn{width:100%;padding:14px;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;transition:.2s;margin-top:8px}.gen-btn:hover{background:var(--accent-hover)}.gen-btn:disabled{background:#94a3b8;cursor:not-allowed}
 .blocker-msg{font-size:.78rem;color:#dc2626;margin-top:5px;line-height:1.3}
 .edit-toggle{font-size:.74rem;color:var(--muted);cursor:pointer;margin:8px 0 4px;user-select:none}.edit-toggle:hover{color:var(--accent)}.edit-toggle.open::before{content:"▾ "}.edit-toggle::before{content:"▸ "}
@@ -103,7 +105,7 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 <link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
-<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
+<header><h1>Artwork Generator</h1><div class="wf-tabs"><button class="wf-tab active" data-wf="nextcloud">Nextcloud</button><button class="wf-tab" data-wf="text">Text</button><button class="wf-tab" data-wf="textimage">Text + Image</button><button class="wf-tab" data-wf="mockup">Artwork Extraction</button><button class="wf-tab" data-wf="artwork">Artwork Generation</button><button class="wf-tab" data-wf="custom">Custom Operation</button></div><div id="sessionIndicator" style="margin-left:auto;font-size:.76rem;display:flex;align-items:center;gap:6px"></div><button id="agentSetupBtn" onclick="openAgentSetup()" style="font-size:.76rem;font-weight:600;padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;margin-left:12px">Agent setup</button><div id="userInfo" style="font-size:.76rem;color:var(--muted);display:flex;align-items:center;gap:8px;margin-left:12px"></div></header>
 <div class="columns">
 <div class="col" id="col1"></div>
 <div class="col" id="col2"></div>
@@ -144,6 +146,7 @@ var activeJobId=null,pollingTimer=null,elapsedTimer=null,stepStart=null,pauseSta
 var historyItems=[],textImageFile="",mockupImageFile="",workerAlive=true;
 var textMode="typed",replaceImageFile="";  // Text workflow input mode + replace-design upload
 var currentTypedText="",replaceNewText="",replaceTargetText="";  // preserved across mode-tab switches
+var referenceImageFile="",imageModeText="";  // UC-3: reference image + wording for image_element/image_style
 var currentWorkflow="nextcloud";
 // --- Arriving from the Design Studio --------------------------------------
 // The studio's vault sends one file over by link. psAsset is that file's row in
@@ -218,17 +221,43 @@ document.querySelectorAll(".wf-tab").forEach(function(t){t.addEventListener("cli
 function renderCols(){
   if(currentWorkflow==="nextcloud"){renderNextcloudCol1();renderNextcloudCol2();ncStartPolling();return}
   ncStopPolling();
-  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{mockupImageFile="";artworkFiles=[];renderCol1();renderCol2()}
+  if(currentWorkflow==="mockup"){textImageFile="";artworkFiles=[];renderMockupCol1();renderMockupCol2()}else if(currentWorkflow==="artwork"){textImageFile="";mockupImageFile="";renderArtworkCol1();renderArtworkCol2()}else if(currentWorkflow==="custom"){textImageFile="";mockupImageFile="";renderCustomCol1();renderCustomCol2()}else{
+    // "text" and "textimage" share the same renderers; they differ only in which
+    // modes they expose. Keep text_mode valid for the active tab.
+    mockupImageFile="";artworkFiles=[];
+    var allowed=_textModesFor(currentWorkflow).map(function(m){return m[0]});
+    if(allowed.indexOf(textMode)<0)textMode=allowed[0];
+    renderCol1();renderCol2();
+  }
   applyNcPrefill();
   updBtn();
 }
+// The Text workflow is split across two sidebar tabs by what the CLIENT supplies:
+//   "text"      -> wording only          (typed, from_image)
+//   "textimage" -> an image              (image_element, image_style, replace)
+// All five still submit as workflow "text" with their text_mode unchanged.
+// Each card carries a one-line "does" so nothing has to be guessed.
+function _textModesFor(wf){
+  if(wf==="textimage")return [
+    ["image_element","Use image as an element","The image is redrawn into the design alongside the wording"],
+    ["image_style","Use image as style only","The image guides the look; it does not appear in the design"],
+    ["replace","Replace text in a design","Keep the artwork, swap its wording for new text"]
+  ];
+  return [
+    ["typed","Type the text","You enter the wording for the design"],
+    ["from_image","Read text from an image","Upload an image and its wording is read out and confirmed"]
+  ];
+}
 function renderCol1(){
-  // Three clearly labelled input modes, not a hidden toggle.
-  var modes=[["typed","Type the text"],["from_image","Read text from an image"],["replace","Replace text in a design"]];
-  var tabs='<div class="tmode-tabs">';
-  modes.forEach(function(m){tabs+='<button type="button" class="tmode-tab'+(textMode===m[0]?" active":"")+'" data-tmode="'+m[0]+'">'+m[1]+'</button>'});
+  var modes=_textModesFor(currentWorkflow);
+  var title=currentWorkflow==="textimage"?"Client image + wording":"Design Text";
+  var tabs='<div class="tmode-tabs tmode-tabs-stacked">';
+  modes.forEach(function(m){
+    tabs+='<button type="button" class="tmode-tab'+(textMode===m[0]?" active":"")+'" data-tmode="'+m[0]+'">'
+      +'<span class="tmode-name">'+m[1]+'</span><span class="tmode-desc">'+m[2]+'</span></button>';
+  });
   tabs+='</div>';
-  col1.innerHTML='<div class="col-title">Design Text</div>'+tabs+'<div id="tmodePanel"></div>';
+  col1.innerHTML='<div class="col-title">'+title+'</div>'+tabs+'<div id="tmodePanel"></div>';
   col1.querySelectorAll(".tmode-tab").forEach(function(b){b.onclick=function(){textMode=b.dataset.tmode;renderCol1();renderCol2();updBtn()}});
   renderTextModePanel();
 }
@@ -241,7 +270,7 @@ function renderTextModePanel(){
     panel.innerHTML='<div class="or-divider">Upload an image \u2014 its text will be read and confirmed</div><div class="drop-zone" id="dz"><p>Drag image here or</p><button class="browse-btn" id="dzBtn">Choose file</button><input type="file" id="dzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div><div class="upload-error" id="dzErr"></div><div class="uploaded-preview" id="dzPrev"></div>';
     _wireDropZone("dz","dzBtn","dzFile","dzErr","dzPrev",function(name){textImageFile=name});
     if(textImageFile)$("dzPrev").innerHTML='<img src="/input/'+textImageFile+'">';
-  }else{ // replace
+  }else if(textMode==="replace"){
     panel.innerHTML=''
       +'<div class="or-divider">Upload the finished design to change the wording in</div>'
       +'<div class="drop-zone" id="rdz"><p>Drag design here or</p><button class="browse-btn" id="rdzBtn">Choose file</button><input type="file" id="rdzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
@@ -252,6 +281,20 @@ function renderTextModePanel(){
     if(replaceImageFile)$("rdzPrev").innerHTML='<img src="/input/'+replaceImageFile+'">';
     var rn=$("rNew");if(rn){rn.value=(replaceNewText||"");rn.oninput=function(){replaceNewText=rn.value;updBtn()}}
     var rt=$("rTarget");if(rt){rt.value=(replaceTargetText||"");rt.oninput=function(){replaceTargetText=rt.value}}
+  }else{ // image_element | image_style (UC-3)
+    var isElement=textMode==="image_element";
+    var caption=isElement
+      ? "Upload a reference image \u2014 it becomes part of the design, redrawn alongside the wording"
+      : "Upload a reference image \u2014 it guides the visual style only and does not appear in the design";
+    panel.innerHTML=''
+      +'<div class="or-divider">'+caption+'</div>'
+      +'<div class="drop-zone" id="idz"><p>Drag image here or</p><button class="browse-btn" id="idzBtn">Choose file</button><input type="file" id="idzFile" accept=".png,.jpg,.jpeg,.webp" style="display:none"></div>'
+      +'<div class="upload-error" id="idzErr"></div><div class="uploaded-preview" id="idzPrev"></div>'
+      +(isElement?'<div class="vm-hint" style="margin-bottom:8px">ChatGPT redraws the image rather than using the original file, so the result will be close but not identical.</div>':'')
+      +'<div class="field-group"><label>Wording</label><input type="text" id="iText" placeholder="Type the wording for the design"></div>';
+    _wireDropZone("idz","idzBtn","idzFile","idzErr","idzPrev",function(name){referenceImageFile=name});
+    if(referenceImageFile)$("idzPrev").innerHTML='<img src="/input/'+referenceImageFile+'">';
+    var it=$("iText");if(it){it.value=(imageModeText||"");it.oninput=function(){imageModeText=it.value;updBtn()}}
   }
 }
 // Shared drop-zone wiring: uploads to /api/upload and calls setName(savedName).
@@ -279,7 +322,12 @@ function renderCol2(){
       +'<div class="edit-toggle" id="tplTog2">Edit prompt for step 2 (final)</div>'
       +'<div class="edit-body" id="tplBody2"><textarea id="tplRF">'+esc(DT.replace_final||"")+'</textarea><div class="tpl-error" id="tplErr2"></div></div>';
   }else{
-    promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(DT.turn1||"")+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
+    // Step-1 template depends on the mode; steps 2/3 are edited in the pause
+    // panels (renderAwaiting), same as typed/from_image.
+    var step1Tpl=DT.turn1||"";
+    if(textMode==="image_element")step1Tpl=DT.image_element_collage||"";
+    else if(textMode==="image_style")step1Tpl=DT.image_style_collage||"";
+    promptBlock='<div class="edit-toggle" id="tplTog">Edit prompt for step 1</div><div class="edit-body" id="tplBody"><textarea id="tpl1">'+esc(step1Tpl)+'</textarea><div class="tpl-error" id="tplErr"></div></div>';
   }
   col2.innerHTML='<div class="col-title">Job Details</div><div class="field-group"><label>Client name</label><input type="text" id="cn" placeholder="e.g. Acme Corp"></div><div class="field-group"><label>Job number</label><input type="text" id="ti" placeholder="e.g. JOB-0042"></div>'+promptBlock+'<button class="gen-btn" id="genBtn" disabled>Generate</button><div class="blocker-msg" id="blkMsg"></div>';
   $("cn").oninput=updBtn;$("ti").oninput=updBtn;
@@ -294,6 +342,7 @@ function updBtn(){
   var hasInput;
   if(textMode==="replace"){hasInput=replaceImageFile&&(replaceNewText||"").trim()}
   else if(textMode==="from_image"){hasInput=textImageFile}
+  else if(textMode==="image_element"||textMode==="image_style"){hasInput=referenceImageFile&&(imageModeText||"").trim()}
   else{hasInput=(dt&&dt.value.trim())||(currentTypedText||"").trim()}
   var hasDetails=cn&&cn.value.trim()&&ti&&ti.value.trim();
   var blocked=activeJobId!==null||!workerAlive||!isLoggedIn;
@@ -316,8 +365,14 @@ function submitJob(){
     var tpl1=$("tpl1"),errT=$("tplErr");
     if(tpl1&&tpl1.value.trim()&&tpl1.value.indexOf("{text}")<0){if(errT)errT.textContent="Must contain {text}";return}
     if(errT)errT.textContent="";
-    body.text=textMode==="typed"?((currentTypedText||($("designText")||{}).value)||""):"";
-    body.text_image=textMode==="from_image"?textImageFile:"";
+    if(textMode==="image_element"||textMode==="image_style"){
+      // UC-3: wording plus a reference image, attached on turn 1 by the agent.
+      body.text=(imageModeText||"").trim();
+      body.reference_image=referenceImageFile;
+    }else{
+      body.text=textMode==="typed"?((currentTypedText||($("designText")||{}).value)||""):"";
+      body.text_image=textMode==="from_image"?textImageFile:"";
+    }
     body.template_turn1=tpl1?tpl1.value:"";
   }
   $("genBtn").disabled=true;resultArea.innerHTML="";statusArea.innerHTML="";lastStatus="";lastStage=-1;lastImgKey="";
@@ -461,6 +516,7 @@ function renderAwaiting(job){
   var si=job.stage_images||{},stage=job.stage||1;
   var choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  html+=_referenceBlock(job);  // UC-3: show the client reference during the pause too
   // "Replace text in a design": a single collage of variations, then the final.
   // No colour stage and no next-step colour prompt to edit.
   if(job.text_mode==="replace"){
@@ -492,9 +548,19 @@ function renderAwaiting(job){
   return html;
 }
 
+// UC-3: show the client's uploaded reference image so the operator can compare
+// the variations/final against it. Empty for every non-image-mode job.
+function _referenceBlock(job){
+  if(job.text_mode!=="image_element"&&job.text_mode!=="image_style")return"";
+  if(!job.reference_image)return"";
+  var kind=job.text_mode==="image_element"?"used as a design element":"used for style only";
+  return '<div class="stage-result"><h3>Client reference \u2014 '+kind+'</h3>'
+    +'<a href="/input/'+esc(job.reference_image)+'" target="_blank"><img src="/input/'+esc(job.reference_image)+'"></a></div>';
+}
 function renderStages(job){
   var si=job.stage_images||{},choices=job.choices||[],prompts=job.prompts||[],hasT0=job.text_image?1:0;
   var html='<div class="job-header">'+esc(job.client)+' / '+esc(job.task_id)+'</div>';
+  html+=_referenceBlock(job);
   if(si.stage1){html+=stageBlock("Step 1 \u2014 Style variations"+(choices[0]?" \u2014 chosen: #"+choices[0]:""),job.id,"stage1",prompts,hasT0,false)}
   if(si.stage2){html+=stageBlock("Step 2 \u2014 Colour variations"+(choices[1]?" \u2014 chosen: #"+choices[1]:""),job.id,"stage2",prompts,hasT0+1,false)}
   if(si.final){html+=stageBlock("Final artwork",job.id,"final",prompts,hasT0+2,true)}

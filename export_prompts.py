@@ -28,6 +28,8 @@ CATALOGUE: dict[str, tuple[str, int, str]] = {
     "TEXT_TURN_3": ("text", 3, "Final artwork, transparent PNG"),
     "TEXT_REPLACE_COLLAGE": ("text", 1, "Replace wording in a supplied design, 8 variations"),
     "TEXT_REPLACE_FINAL": ("text", 2, "Final artwork from the chosen replacement variation"),
+    "TEXT_IMAGE_ELEMENT_COLLAGE": ("text", 1, "Wording + reference image as an element, 8 variations"),
+    "TEXT_IMAGE_STYLE_COLLAGE": ("text", 1, "Wording styled after a reference image, 8 variations"),
 
     # --- Artwork Extraction ---
     "EXTRACT_CONTACT_SHEET": ("mockup", 1, "One numbered contact sheet of every design on a client sheet"),

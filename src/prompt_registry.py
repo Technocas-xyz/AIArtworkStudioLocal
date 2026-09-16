@@ -52,6 +52,13 @@ PROMPT_KEYS: dict[str, str] = {
     "TEXT_TURN_1": "AIS.TEXT.COLLAGE",
     "TEXT_TURN_2": "AIS.COLORWAY.GENERATE",
     "TEXT_TURN_3": "AIS.TEXT.FINAL",
+    # "Replace text in a design" mode (Text workflow, third input mode).
+    "TEXT_REPLACE_COLLAGE": "AIS.TEXT.REPLACE_COLLAGE",
+    "TEXT_REPLACE_FINAL": "AIS.TEXT.REPLACE_FINAL",
+    # "Wording with a client-supplied image" modes (UC-3): stage-1 collage only.
+    # Turns 2/3 reuse TEXT_TURN_2 / TEXT_TURN_3.
+    "TEXT_IMAGE_ELEMENT_COLLAGE": "AIS.TEXT.IMAGE_ELEMENT_COLLAGE",
+    "TEXT_IMAGE_STYLE_COLLAGE": "AIS.TEXT.IMAGE_STYLE_COLLAGE",
     "EXTRACT_CONTACT_SHEET": "AIS.EXTRACT.DETECT",
     "EXTRACT_SINGLE": "AIS.EXTRACT.SINGLE",
     "ARTWORK_REGENERATE": "AIS.RECREATE.CLEANUP",
@@ -82,9 +89,24 @@ PROMPT_KEYS: dict[str, str] = {
 
 # Which prompts each workflow can use, for the per-job snapshot and the run log.
 WORKFLOW_PROMPTS: dict[str, list[str]] = {
-    "text": ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"],
+    # Default (superset) for the Text workflow: the typed/from-image turns plus
+    # the "replace text in a design" prompts. prompt_names_for_job narrows this
+    # to the exact prompts a job uses when the text_mode is known.
+    "text": ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3",
+             "TEXT_REPLACE_COLLAGE", "TEXT_REPLACE_FINAL",
+             "TEXT_IMAGE_ELEMENT_COLLAGE", "TEXT_IMAGE_STYLE_COLLAGE"],
     "mockup": ["EXTRACT_CONTACT_SHEET", "EXTRACT_SINGLE"],
     "artwork": ["ARTWORK_REGENERATE"],
+}
+
+# The prompts each Text input mode actually runs.
+TEXT_MODE_PROMPTS: dict[str, list[str]] = {
+    "typed": ["TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"],
+    "from_image": ["TEXT_TURN_0", "TEXT_TURN_1", "TEXT_TURN_2", "TEXT_TURN_3"],
+    "replace": ["TEXT_REPLACE_COLLAGE", "TEXT_REPLACE_FINAL"],
+    # Image modes: their own stage-1 collage, then the shared colour + final.
+    "image_element": ["TEXT_IMAGE_ELEMENT_COLLAGE", "TEXT_TURN_2", "TEXT_TURN_3"],
+    "image_style": ["TEXT_IMAGE_STYLE_COLLAGE", "TEXT_TURN_2", "TEXT_TURN_3"],
 }
 CUSTOM_OPERATION_PROMPTS: dict[str, list[str]] = {
     "reconstruct": ["CUSTOM_RECONSTRUCT"],
@@ -290,7 +312,8 @@ registry = PromptRegistry()
 
 
 def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = None,
-                         options: list[str] | None = None) -> list[str]:
+                         options: list[str] | None = None,
+                         text_mode: str | None = None) -> list[str]:
     if workflow == "custom":
         names: list[str] = []
         for op in custom_operations or []:
@@ -300,6 +323,10 @@ def prompt_names_for_job(workflow: str, custom_operations: list[str] | None = No
         # The edit-options job: the base block, then one block per chosen option.
         return ["BASE_INSTRUCTION"] + [option_template_name(o) for o in options
                                        if option_template_name(o) in PROMPT_KEYS]
+    if workflow == "text" and text_mode:
+        # Narrow to the prompts this input mode actually runs; unknown modes fall
+        # back to the full text superset so nothing is dropped.
+        return list(TEXT_MODE_PROMPTS.get(text_mode, WORKFLOW_PROMPTS["text"]))
     return list(WORKFLOW_PROMPTS.get(workflow, []))
 
 

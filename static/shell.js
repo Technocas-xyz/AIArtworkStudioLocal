@@ -28,18 +28,21 @@
   ];
   var WF_ICONS = {
     text: "typography",
+    textimage: "photo-edit",
     mockup: "scissors",
     artwork: "wand",
     custom: "adjustments"
   };
   var PAGE_DESC = {
-    text: "Generate finished artwork from a line of design text.",
+    text: "Generate finished artwork from wording the client supplies.",
+    textimage: "The client supplies an image — use it as an element, as style, or replace its wording.",
     mockup: "Pull individual designs out of a mockup or contact sheet.",
     artwork: "Batch clean-up and regeneration of supplied artwork.",
     custom: "Apply a chosen sequence of operations to one artwork."
   };
   var PAGE_TITLE = {
     text: "Text",
+    textimage: "Text + Image",
     mockup: "Artwork Extraction",
     artwork: "Artwork Generation",
     custom: "Custom Operation"
