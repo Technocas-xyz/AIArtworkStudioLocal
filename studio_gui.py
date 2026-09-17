@@ -292,18 +292,42 @@ class StudioGUI:
 
     def _do_signin(self):
         try:
-            first_time = self._context is None
             page = self._ensure_context()
-            if not first_time:
+            # ALWAYS (re)navigate to chatgpt.com on a sign-in click, bounded so a
+            # slow/unreachable network can't leave the browser stuck on
+            # about:blank forever. open_browser_context() may have already
+            # timed out its own initial nav, so we retry here explicitly.
+            nav_ok = False
+            nav_err = ""
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            try:
+                page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=60_000)
+                nav_ok = True
+            except Exception as nav_exc:
+                nav_err = str(nav_exc)
+                self._events.put(("log", f"sign-in navigation to chatgpt.com failed: {nav_exc}"))
+
+            logged_in = False
+            if nav_ok:
                 try:
-                    page.bring_to_front()
-                    page.goto("https://chatgpt.com", wait_until="domcontentloaded")
+                    logged_in = is_logged_in(page)
                 except Exception:
-                    pass
-            logged_in = is_logged_in(page)
+                    logged_in = False
             self._signed_in = bool(logged_in)
             local_worker.set_logged_in(self._signed_in)
-            self._events.put(("signin_done", logged_in))
+            if nav_ok:
+                self._events.put(("signin_done", logged_in))
+            else:
+                # Navigation itself failed — this is almost always the PC being
+                # unable to reach chatgpt.com (network/DNS/proxy/firewall). Say so
+                # clearly instead of sitting on "Opening browser to sign in…".
+                self._events.put(("signin_error",
+                                  "Could not load chatgpt.com. Check this PC can open "
+                                  "https://chatgpt.com in a normal browser (network/proxy/firewall). "
+                                  + (nav_err[:200] if nav_err else "")))
         except Exception as exc:
             traceback.print_exc()
             self._events.put(("signin_error", str(exc)))

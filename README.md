@@ -196,12 +196,46 @@ build with `STUDIO_BUILD_CONSOLE=1` set.
 
 ---
 
+## Which browser the automation uses
+
+The automation drives ChatGPT through a browser it controls (via Playwright). It
+does **not** use your everyday browser window, because it has to programmatically
+type prompts, click send, and read back generated images — which only works in a
+browser Playwright launches and owns.
+
+By default it launches your **installed Google Chrome** (Playwright
+`channel="chrome"`), using a **separate profile** kept in `profiles/acct1`. This
+matters: using your real Chrome means the automation shares the same network,
+proxy, VPN and certificate settings that already let chatgpt.com load in your
+normal browser. (An earlier version bundled its own Chromium, which on some PCs
+could not reach chatgpt.com and got stuck on `about:blank`.)
+
+You still sign in to ChatGPT **once** inside that controlled window — it uses a
+separate profile, so it does not inherit (or interfere with) your day-to-day
+Chrome session.
+
+Override the browser with the `STUDIO_BROWSER_CHANNEL` environment variable
+(set it in `.env`):
+
+```
+STUDIO_BROWSER_CHANNEL=chrome     # default — installed Google Chrome
+STUDIO_BROWSER_CHANNEL=msedge     # installed Microsoft Edge
+STUDIO_BROWSER_CHANNEL=chromium   # the bundled Chromium (old behaviour)
+```
+
+If the chosen channel isn't installed, the app falls back to the bundled
+Chromium automatically.
+
+Your **default browser** is still used — but only for the operator UI web page
+(`http://127.0.0.1:8000`), which is just a normal page you click around in.
+
 ## Notes / limitations
 
 - **One job at a time per PC.** Each machine runs its own local queue; there is no
   cross-designer job sharing (that was a feature of the old shared server, removed
   by design).
 - **ChatGPT sign-in is manual and one-time.** The app cannot log in for you; it
-  reuses your saved browser session.
-- The first ChatGPT page load can be slow on a poor connection. It is bounded and
-  non-fatal — the app won't hang on it; just retry sign-in once the network is up.
+  reuses the saved session in its own browser profile.
+- The first ChatGPT page load is bounded and non-fatal — the app won't hang on it.
+  If sign-in reports it couldn't load chatgpt.com, confirm the PC can open
+  `https://chatgpt.com` in a normal browser, then retry.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from config.selectors import PROMPT_BOX
@@ -35,51 +37,89 @@ class ProfileLockedError(Exception):
 
 
 def launch_context(account: str) -> BrowserContext:
-    """Launch a persistent Chromium context for the given account.
+    """Launch a persistent browser context for the given account.
 
-    Uses a per-account profile directory so cookies and session state
-    are preserved across runs.
+    Prefers the REAL installed Google Chrome (Playwright ``channel="chrome"``)
+    so the automation uses the same browser — and therefore the same network
+    stack, proxy, VPN and certificate settings — that loads chatgpt.com fine in
+    the operator's normal browser. The bundled Chromium is only a fallback for a
+    machine that has no Chrome installed.
 
-    Parameters
-    ----------
-    account:
-        Identifier used to namespace the browser profile directory.
+    Why this matters: on some PCs the bundled Chromium could not reach
+    chatgpt.com (it stayed on about:blank) even though the user's normal Chrome
+    opened it fine — a proxy/cert difference. Using the installed Chrome removes
+    that difference.
 
-    Returns
-    -------
-    BrowserContext
-        A Playwright BrowserContext ready for page creation.
+    Override with the STUDIO_BROWSER_CHANNEL env var:
+        "chrome"  (default) — use installed Google Chrome, fall back to Chromium
+        "msedge"            — use installed Microsoft Edge, fall back to Chromium
+        "chromium"          — force the bundled Chromium (old behaviour)
+
+    Uses a per-account profile directory so cookies and session state are
+    preserved across runs.
 
     Raises
     ------
     ProfileLockedError
-        If the profile directory is already in use by another Chromium instance.
+        If the profile directory is already in use by another browser instance.
     """
     # Absolute, fixed profile path derived from the app directory (never
     # relative to the CWD, never inside the self-update-swapped code/ folder),
     # so the saved ChatGPT session persists across restarts AND updates.
     profile_path = profile_dir(account)
     print(f"[agent] using browser profile {profile_path}")
+
+    channel = (os.environ.get("STUDIO_BROWSER_CHANNEL", "chrome") or "chrome").strip().lower()
+    common_kwargs = dict(
+        user_data_dir=str(profile_path),
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+
+    def _grant(context: "BrowserContext") -> "BrowserContext":
+        try:
+            context.grant_permissions(
+                ["clipboard-read", "clipboard-write"],
+                origin="https://chatgpt.com",
+            )
+        except Exception:
+            pass
+        return context
+
     try:
         pw = sync_playwright().start()
-        context: BrowserContext = pw.chromium.launch_persistent_context(
-            user_data_dir=str(profile_path),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context.grant_permissions(
-            ["clipboard-read", "clipboard-write"],
-            origin="https://chatgpt.com",
-        )
-        return context
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "already in use" in msg or "existing browser session" in msg or "lock" in msg:
-            raise ProfileLockedError(
-                f"Profile '{profile_path}' is already in use by another Chromium instance. "
-                "Close any open automation browser windows and try again."
-            ) from exc
+    except Exception:
         raise
+
+    # Build the ordered list of things to try. A real channel first (if asked),
+    # then the bundled Chromium as a safety net.
+    attempts: list[tuple[str, dict]] = []
+    if channel in ("chrome", "msedge"):
+        attempts.append((channel, {**common_kwargs, "channel": channel}))
+    attempts.append(("chromium", dict(common_kwargs)))  # bundled fallback
+
+    last_exc: Exception | None = None
+    for label, kwargs in attempts:
+        try:
+            print(f"[agent] launching browser channel={label!r}")
+            context: BrowserContext = pw.chromium.launch_persistent_context(**kwargs)
+            print(f"[agent] browser launched via {label!r}")
+            return _grant(context)
+        except Exception as exc:
+            msg = str(exc).lower()
+            # A profile lock is fatal for every channel (same profile dir), so
+            # surface it clearly rather than falling through to the next attempt.
+            if "already in use" in msg or "existing browser session" in msg or "lock" in msg:
+                raise ProfileLockedError(
+                    f"Profile '{profile_path}' is already in use by another browser instance. "
+                    "Close any open automation browser windows and try again."
+                ) from exc
+            last_exc = exc
+            print(f"[agent] channel {label!r} unavailable ({exc}); trying next option")
+
+    # Every attempt failed for a non-lock reason (e.g. neither Chrome nor the
+    # bundled Chromium could launch).
+    raise last_exc if last_exc else RuntimeError("Could not launch any browser.")
 
 
 # ---------------------------------------------------------------------------
