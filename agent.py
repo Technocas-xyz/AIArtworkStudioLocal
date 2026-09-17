@@ -1577,7 +1577,16 @@ def open_browser_context():
     print("[agent] launch_persistent_context('acct1') — opening browser context")
     context = launch_context("acct1")
     page = context.pages[0] if context.pages else context.new_page()
-    page.goto("https://chatgpt.com", wait_until="domcontentloaded")
+    # Navigate to ChatGPT, but bounded and NON-FATAL: on a slow or offline
+    # network the first load can be very slow, and startup must not hang or die
+    # on it. The context is fully usable regardless — is_logged_in simply reports
+    # "not signed in" until the page finishes loading, and the operator can
+    # retry from the app window. Without a timeout here a slow link blocked the
+    # whole agent/studio startup indefinitely.
+    try:
+        page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=30_000)
+    except Exception as exc:
+        print(f"[agent] initial chatgpt.com load slow/unavailable (continuing): {exc}")
     return context, page
 
 

@@ -15,6 +15,7 @@ import io
 import mimetypes
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -91,6 +92,25 @@ app.add_middleware(AuthMiddleware)
 
 jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Resource / working-dir resolution.
+#
+# Read-only bundled assets (static/) are resolved relative to the app package so
+# a frozen (PyInstaller) build finds them under sys._MEIPASS, while a source run
+# finds them next to app.py. Writable dirs (input/output/logs/downloads) are
+# resolved relative to the current working directory (which the desktop entry
+# point sets to a stable, writable app folder next to the exe).
+# ---------------------------------------------------------------------------
+def _bundle_dir() -> Path:
+    """Directory that holds read-only bundled assets like static/."""
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        return Path(mei)
+    return Path(__file__).resolve().parent
+
+
+STATIC_DIR = _bundle_dir() / "static"
 
 INPUT_DIR = Path("./input")
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -192,7 +212,13 @@ def _heartbeat(agent_id: str | None) -> None:
 
 
 def _requeue_stale_jobs() -> None:
-    """Release jobs whose claiming agent stopped sending progress."""
+    """Release jobs whose claiming agent stopped sending progress.
+
+    In the single-process (local worker) model there is no remote agent that can
+    go silent, so this is a no-op unless the legacy network agent path is in use.
+    """
+    if _LOCAL_MODE:
+        return
     now = time.time()
     with _jobs_lock:
         for j in jobs.values():
@@ -204,6 +230,97 @@ def _requeue_stale_jobs() -> None:
                     j["claimed_by"] = None
                     j["claimed_at"] = None
                     j["stage_label"] = "Requeued — waiting for an agent"
+
+
+# ---------------------------------------------------------------------------
+# Local (single-process) worker integration.
+#
+# When the app runs as the self-contained desktop studio, one in-process worker
+# (local_worker.py) claims jobs from this same `jobs` dict, runs the workflows
+# against the local browser, and writes straight to ./output. The operator's
+# pause answers, cancel, and status all talk to that worker directly instead of
+# a remote agent fleet. `_LOCAL_MODE` is flipped on by studio.py / studio_gui.py
+# when they start the worker; until then the legacy /api/agent/* path still
+# works, so nothing breaks if the app is started the old way.
+# ---------------------------------------------------------------------------
+_LOCAL_MODE = False
+
+
+def enable_local_mode() -> None:
+    """Called by the desktop entry point once the in-process worker is started."""
+    global _LOCAL_MODE
+    _LOCAL_MODE = True
+
+
+def _local_worker():
+    """Import the worker lazily so app.py still imports without it (e.g. tests)."""
+    try:
+        import local_worker
+        return local_worker
+    except Exception:
+        return None
+
+
+def _worker_ready() -> bool:
+    """Can a new job start? Local mode: the worker loop is alive. Legacy: an
+    online agent exists."""
+    if _LOCAL_MODE:
+        lw = _local_worker()
+        return bool(lw and lw.is_worker_running())
+    return _online_agent() is not None
+
+
+def _worker_free() -> bool:
+    """Is the worker idle (no active job)? Local mode: no busy job here."""
+    if _LOCAL_MODE:
+        return not any(j.get("status") in _AGENT_BUSY_STATUSES for j in jobs.values())
+    return _free_agent_exists()
+
+
+def _local_logged_in() -> bool:
+    lw = _local_worker()
+    return bool(lw and lw.get_state().get("logged_in"))
+
+
+def _local_name() -> str:
+    lw = _local_worker()
+    st = lw.get_state() if lw else {}
+    return st.get("name") or "This PC"
+
+
+def _resume_worker(job_id: str) -> None:
+    """Release a paused job in the in-process worker (no-op in legacy mode)."""
+    if not _LOCAL_MODE:
+        return
+    lw = _local_worker()
+    if lw:
+        lw.resume(job_id)
+
+
+def _cancel_worker(job_id: str) -> None:
+    if not _LOCAL_MODE:
+        return
+    lw = _local_worker()
+    if lw:
+        lw.cancel(job_id)
+
+
+def on_job_terminal(job: dict) -> None:
+    """Terminal-state bookkeeping the old /result + merge path used to do:
+    recompute similarity (cv2 is in-process now) and report the prompt run log.
+    Passed to local_worker.start(on_terminal=...)."""
+    try:
+        _recompute_aspect_similarity(job)
+    except Exception as exc:
+        print(f"[local] aspect similarity failed: {exc}")
+    try:
+        _recompute_replace_similarity(job)
+    except Exception as exc:
+        print(f"[local] replace similarity failed: {exc}")
+    try:
+        _report_prompt_runs(job)
+    except Exception as exc:
+        print(f"[local] prompt run report failed: {exc}")
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -438,7 +555,7 @@ def _free_agent_exists() -> bool:
 
 @app.get("/login", response_class=HTMLResponse)
 def serve_login():
-    return HTMLResponse(content=Path("static/login.html").read_text(encoding="utf-8"))
+    return HTMLResponse(content=(STATIC_DIR / "login.html").read_text(encoding="utf-8"))
 
 
 class LoginRequest(BaseModel):
@@ -481,7 +598,7 @@ def auth_me(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def serve_index():
-    return HTMLResponse(content=Path("static/index.html").read_text(encoding="utf-8"))
+    return HTMLResponse(content=(STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
 
 @app.get("/api/inputs")
@@ -601,17 +718,16 @@ def artwork_info(file: str, dpi: int | None = None):
 @app.post("/api/generate")
 def create_job(req: GenerateRequest):
     print(f"[create_job] workflow={req.workflow!r} mockup_image={req.mockup_image!r} files={req.files} artwork_files={req.artwork_files}")
-    if _online_agent() is None:
-        raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC to generate.")
+    if not _worker_ready():
+        raise HTTPException(status_code=503, detail="The studio worker is not running. Start the app (or sign in to ChatGPT) before generating.")
     if not req.client.strip():
         raise HTTPException(status_code=400, detail="Client name is required.")
     if not req.task_id.strip():
         raise HTTPException(status_code=400, detail="Job number is required.")
-    # Per-agent limit: refuse only when every online agent is already busy, not
-    # merely because some other designer's job exists. A queued job will be
-    # picked up by whichever agent frees up next.
-    if not _free_agent_exists():
-        raise HTTPException(status_code=409, detail="All agents are busy. Wait for one to finish, or start another agent.")
+    # Single local worker: refuse a new job only while it is already busy on one.
+    # A queued job is picked up the moment the worker frees up.
+    if not _worker_free():
+        raise HTTPException(status_code=409, detail="A job is already running. Wait for it to finish before starting another.")
 
     if req.workflow == "text":
         if req.text_mode == "replace":
@@ -795,6 +911,7 @@ def submit_selection(job_id: str, req: SelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True, "choice": req.choice}
 
 
@@ -821,6 +938,7 @@ def regenerate_stage(job_id: str, req: RegenerateRequest):
     job["_regenerate"] = True
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True}
 
 
@@ -840,8 +958,10 @@ def cancel_job(job_id: str):
     job["finished_at"] = time.time()
     job["awaiting_input"] = False
 
-    # The agent detects the "cancelled" status on its next poll (progress or
-    # paused-input) and aborts the job cleanly. No local event to signal.
+    # Local mode: wake the in-process worker so it observes the cancellation at
+    # once (a paused job is blocked on its resume event). Legacy: the remote
+    # agent detects "cancelled" on its next poll.
+    _cancel_worker(job_id)
     print(f"[cancel] Job {job_id}: {old_status} -> cancelled")
     _report_prompt_runs(job)
     return {"ok": True}
@@ -860,6 +980,7 @@ def confirm_text(job_id: str, req: TextConfirmRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True}
 
 
@@ -901,6 +1022,7 @@ def handle_crops(job_id: str, req: CropActionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True}
 
 
@@ -922,6 +1044,7 @@ def select_multi(job_id: str, req: MultiSelectRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True}
 
 
@@ -942,6 +1065,7 @@ def select_numbers(job_id: str, req: NumberSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True, "numbers": req.numbers}
 
 
@@ -959,6 +1083,7 @@ def select_objects(job_id: str, req: ObjectSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True}
 
 
@@ -1007,6 +1132,7 @@ def select_ratio(job_id: str, req: RatioSelectionRequest):
     job.setdefault("_answered_pause_stages", []).append(job.get("stage"))
     job["status"] = "running"
     job["awaiting_input"] = False
+    _resume_worker(job_id)
     return {"ok": True, "target": {"w": w, "h": h}, "method": method}
 
 
@@ -1157,9 +1283,45 @@ def open_folder(req: OpenFolderRequest):
     return {"ok": True}
 
 
+def _local_status() -> dict:
+    """/api/status for the single local worker. Keeps the same keys the existing
+    UI reads (worker_alive, logged_in, agent_connected, agent_name, agent_count,
+    free_agent, active_jobs, blocking_job_id) so the front-end works unchanged."""
+    running = _worker_ready()
+    logged_in = _local_logged_in()
+    name = _local_name()
+    active_jobs = [
+        {"job_id": j.get("id"), "status": j.get("status"),
+         "agent": name, "agent_id": "local"}
+        for j in jobs.values() if j.get("status") in _AGENT_BUSY_STATUSES
+    ]
+    if not running:
+        worker_error = "The studio worker is not running. Start the app (or sign in to ChatGPT)."
+    elif not logged_in:
+        worker_error = "Not signed in to ChatGPT. Click Sign in on the app window."
+    else:
+        worker_error = ""
+    return {
+        "blocking_job_id": None,
+        "free_agent": _worker_free(),
+        "busy_agent_count": 1 if active_jobs else 0,
+        "active_jobs": active_jobs,
+        "worker_alive": running,
+        "worker_error": worker_error,
+        "logged_in": logged_in,
+        "agent_connected": running,
+        "agent_count": 1 if running else 0,
+        "agent_name": name,
+        "agent_names": [name] if running else [],
+        "local_mode": True,
+    }
+
+
 @app.get("/api/status")
 def get_status():
     _requeue_stale_jobs()
+    if _LOCAL_MODE:
+        return _local_status()
     live = _online_agents()
     # `worker_alive`/`logged_in` keys are kept for the existing UI: they now mean
     # "at least one agent is connected" and "at least one connected agent reports
@@ -1199,8 +1361,13 @@ def get_status():
 
 @app.get("/api/session")
 def get_session():
-    """Report the fleet's ChatGPT session state (agent-reported). Signed-in if
-    ANY connected agent reports a session."""
+    """Report the ChatGPT session state.
+
+    Local mode: the state of the one in-process browser. Legacy: signed-in if any
+    connected agent reports a session."""
+    if _LOCAL_MODE:
+        return {"logged_in": _local_logged_in(), "account": "acct1",
+                "agent_connected": _worker_ready(), "agent_name": _local_name()}
     live = _online_agents()
     label_agent = next((a for a in live if a.get("logged_in")), live[0] if live else None)
     return {"logged_in": _any_agent_logged_in(live), "account": "acct1",
@@ -1210,8 +1377,10 @@ def get_session():
 
 @app.post("/api/session/login")
 def session_login():
-    """Sign-in now happens on the designer's PC: they run login.py there. The
-    server cannot drive the remote browser, so this just reports guidance."""
+    """Sign-in guidance. In local mode the sign-in happens in the app window's
+    browser (Sign in to ChatGPT button); legacy mode points at the PC agent."""
+    if _LOCAL_MODE:
+        return {"ok": True, "message": "Use the app window's 'Sign in to ChatGPT' button to sign in."}
     if not _online_agents():
         raise HTTPException(status_code=503, detail="No agent running. Start the agent on your PC.")
     return {"ok": True, "message": "Run login.py on the PC where the agent runs to sign in to ChatGPT."}
@@ -1219,7 +1388,9 @@ def session_login():
 
 @app.post("/api/session/confirm")
 def session_confirm():
-    """Re-report the fleet's session state."""
+    """Re-report the session state."""
+    if _LOCAL_MODE:
+        return {"logged_in": _local_logged_in()}
     return {"logged_in": _any_agent_logged_in()}
 
 
@@ -2266,5 +2437,5 @@ def printshop_save_wrk(req: PrintshopSaveRequest):
 nc_watcher.start()
 
 
-app.mount("/input", StaticFiles(directory="input"), name="input")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/input", StaticFiles(directory=str(INPUT_DIR)), name="input")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
