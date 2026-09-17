@@ -203,28 +203,31 @@ does **not** use your everyday browser window, because it has to programmaticall
 type prompts, click send, and read back generated images — which only works in a
 browser Playwright launches and owns.
 
-By default it launches your **installed Google Chrome** (Playwright
-`channel="chrome"`), using a **separate profile** kept in `profiles/acct1`. This
-matters: using your real Chrome means the automation shares the same network,
-proxy, VPN and certificate settings that already let chatgpt.com load in your
-normal browser. (An earlier version bundled its own Chromium, which on some PCs
-could not reach chatgpt.com and got stuck on `about:blank`.)
+By default it **attaches to your real installed Google Chrome** over the
+DevTools protocol (`STUDIO_BROWSER_CHANNEL=attach`). It starts Chrome as an
+ordinary process (with a dedicated profile under `profiles/acct1_chrome`) and
+connects to it — Playwright does **not** launch it with automation switches.
+This is the most reliable path against ChatGPT's Cloudflare anti-bot check: an
+ordinary Chrome, using your real network/proxy/VPN/certs, is not flagged the way
+a Playwright-launched browser is. (Earlier approaches — a bundled Chromium, and
+a Playwright-launched Chrome — hit `about:blank` or a "Performing security
+verification" hard block on some machines.)
 
-You still sign in to ChatGPT **once** inside that controlled window — it uses a
-separate profile, so it does not inherit (or interfere with) your day-to-day
-Chrome session.
+You sign in to ChatGPT **once** inside that window. It uses a dedicated profile,
+so it does not inherit or interfere with your day-to-day Chrome session.
 
 Override the browser with the `STUDIO_BROWSER_CHANNEL` environment variable
 (set it in `.env`):
 
 ```
-STUDIO_BROWSER_CHANNEL=chrome     # default — installed Google Chrome
-STUDIO_BROWSER_CHANNEL=msedge     # installed Microsoft Edge
-STUDIO_BROWSER_CHANNEL=chromium   # the bundled Chromium (old behaviour)
+STUDIO_BROWSER_CHANNEL=attach     # default — start real Chrome + attach over CDP (least detectable)
+STUDIO_BROWSER_CHANNEL=chrome     # Playwright launches installed Google Chrome
+STUDIO_BROWSER_CHANNEL=msedge     # Playwright launches installed Microsoft Edge
+STUDIO_BROWSER_CHANNEL=chromium   # the bundled Chromium
 ```
 
-If the chosen channel isn't installed, the app falls back to the bundled
-Chromium automatically.
+If `attach` can't find/start Chrome it falls back to a launched Chrome, then to
+the bundled Chromium.
 
 Your **default browser** is still used — but only for the operator UI web page
 (`http://127.0.0.1:8000`), which is just a normal page you click around in.
