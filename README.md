@@ -205,19 +205,34 @@ browser Playwright launches and owns.
 
 By default it **attaches to your real installed Google Chrome** over the
 DevTools protocol (`STUDIO_BROWSER_CHANNEL=attach`). It starts Chrome as an
-ordinary process (with a dedicated profile under `profiles/acct1_chrome`) and
-connects to it — Playwright does **not** launch it with automation switches.
-This is the most reliable path against ChatGPT's Cloudflare anti-bot check: an
-ordinary Chrome, using your real network/proxy/VPN/certs, is not flagged the way
-a Playwright-launched browser is. (Earlier approaches — a bundled Chromium, and
-a Playwright-launched Chrome — hit `about:blank` or a "Performing security
-verification" hard block on some machines.)
+ordinary process and connects to it — Playwright does **not** launch it with
+automation switches. This is the most reliable path against ChatGPT's Cloudflare
+anti-bot check: an ordinary Chrome, using your real network/proxy/VPN/certs, is
+not flagged the way a Playwright-launched browser is. (Earlier approaches — a
+bundled Chromium, and a Playwright-launched Chrome — hit `about:blank` or a
+"Performing security verification" hard block on some machines.)
 
-You sign in to ChatGPT **once** inside that window. It uses a dedicated profile,
-so it does not inherit or interfere with your day-to-day Chrome session.
+**Login: automatic combo check.** On sign-in the app:
 
-Override the browser with the `STUDIO_BROWSER_CHANNEL` environment variable
-(set it in `.env`):
+1. First tries your **real everyday Chrome profile** (where you are most likely
+   already logged in to ChatGPT). If it finds a signed-in session, it uses it —
+   **no separate login needed.** (This also avoids a fresh-profile quirk where
+   OpenAI's login could return a `400 Invalid content type` error.)
+   - Your everyday Chrome must be **fully closed** for this, because Chrome locks
+     its profile while running. If Chrome is open, the app skips this step.
+2. If your real profile isn't signed in (or Chrome was open), it uses a
+   **dedicated profile** (`profiles/acct1_chrome`) and asks you to sign in once.
+   That session then persists across runs.
+
+Force one behaviour with `STUDIO_USE_DEFAULT_PROFILE` in `.env`:
+
+```
+STUDIO_USE_DEFAULT_PROFILE=only    # ONLY use your real everyday Chrome profile (close Chrome first)
+STUDIO_USE_DEFAULT_PROFILE=never   # always use the dedicated profile, never your real one
+# (unset)                          # the combo behaviour above (recommended)
+```
+
+Override the browser mechanism with `STUDIO_BROWSER_CHANNEL`:
 
 ```
 STUDIO_BROWSER_CHANNEL=attach     # default — start real Chrome + attach over CDP (least detectable)

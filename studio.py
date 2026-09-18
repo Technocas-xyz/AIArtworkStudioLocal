@@ -58,7 +58,7 @@ import uvicorn
 import app as app_module
 import agent
 import local_worker
-from src.browser import is_logged_in
+from src.browser import is_logged_in, wait_for_login
 
 
 HOST = "127.0.0.1"
@@ -143,19 +143,21 @@ def main() -> None:
         traceback.print_exc()
         return
 
-    try:
-        logged_in = is_logged_in(page)
-    except Exception:
-        logged_in = False
+    # Patiently wait for the session to be ready — this gives you time to clear
+    # any Cloudflare "Verifying…" screen and/or sign in by hand in the Chrome
+    # window. The session then persists in the profile for next time.
+    if not is_logged_in(page):
+        print("=" * 64)
+        print("  Complete the ChatGPT / Cloudflare check in the Chrome window that")
+        print("  just opened (and sign in if asked). Waiting up to 5 minutes…")
+        print("=" * 64)
+    logged_in = wait_for_login(page, timeout=300.0)
     local_worker.set_logged_in(logged_in)
     if logged_in:
         print("[studio] ChatGPT session OK — logged in.")
     else:
-        print("=" * 64)
-        print("  NOT LOGGED IN to ChatGPT.")
-        print("  Sign in in the Chrome window that just opened, then leave it open.")
-        print("  (Or run:  python login.py)")
-        print("=" * 64)
+        print("[studio] Still not signed in after waiting. You can complete sign-in "
+              "in the browser window; the worker will pick it up once ready.")
 
     # 4) Run the worker claim loop on THIS thread (same thread as the page).
     #    This blocks until stopped (Ctrl+C).

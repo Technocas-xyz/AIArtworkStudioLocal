@@ -127,7 +127,13 @@ _warn_buffer: list[str] = []     # non-fatal warnings not yet sent
 
 
 class _Tee:
-    """Wrap a stream so every line printed is also captured for the current job."""
+    """Wrap a stream so every line printed is also captured for the current job.
+
+    Delegates any stream method it doesn't define (isatty, fileno, encoding, …)
+    to the wrapped stream, so libraries that probe stdout — e.g. uvicorn's
+    logging calls sys.stdout.isatty() — behave exactly as without the tee.
+    Missing this raised AttributeError and stopped the local server from
+    starting."""
     def __init__(self, stream):
         self._stream = stream
 
@@ -144,12 +150,44 @@ class _Tee:
                     _log_buffer.append(line)
                     if len(_log_buffer) > _LOG_BUFFER_MAX:
                         del _log_buffer[:len(_log_buffer) - _LOG_BUFFER_MAX]
+        return len(s) if isinstance(s, str) else 0
 
     def flush(self):
         try:
             self._stream.flush()
         except Exception:
             pass
+
+    def isatty(self):
+        try:
+            return bool(self._stream and self._stream.isatty())
+        except Exception:
+            return False
+
+    def fileno(self):
+        if self._stream is not None and hasattr(self._stream, "fileno"):
+            return self._stream.fileno()
+        raise OSError("no fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self._stream, "encoding", "utf-8")
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def __getattr__(self, name):
+        # Anything else a library pokes at → delegate to the wrapped stream.
+        # Guard against recursion if _stream itself is missing.
+        if name == "_stream":
+            raise AttributeError(name)
+        return getattr(self._stream, name)
 
 
 # Install the tee once, at import, so all print() output is captured.

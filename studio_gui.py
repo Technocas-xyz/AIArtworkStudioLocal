@@ -41,6 +41,75 @@ def _appbase() -> Path:
 _BASE = _appbase()
 os.chdir(_BASE)
 
+
+# --- Diagnostic log ---------------------------------------------------------
+# The packaged app is windowed (no console), so every print() from the browser
+# launch/attach code and any traceback would otherwise be lost. Tee stdout and
+# stderr to studio_debug.log next to the exe so a failing sign-in can be
+# diagnosed from the file. Best-effort — never breaks startup.
+class _Tee:
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+        # The primary (real) stream is the first one; delegate terminal queries
+        # like isatty()/fileno() to it so libraries (e.g. uvicorn's logging,
+        # which calls sys.stdout.isatty()) behave exactly as they would without
+        # the tee. Missing this raised AttributeError and stopped the server.
+        self._primary = self._streams[0] if self._streams else None
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+                st.flush()
+            except Exception:
+                pass
+        return len(s) if isinstance(s, str) else 0
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        try:
+            return bool(self._primary and self._primary.isatty())
+        except Exception:
+            return False
+
+    def fileno(self):
+        if self._primary is not None and hasattr(self._primary, "fileno"):
+            return self._primary.fileno()
+        raise OSError("no fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self._primary, "encoding", "utf-8")
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def __getattr__(self, name):
+        # Any other stream attribute libraries poke at → delegate to the primary.
+        return getattr(self._primary, name)
+
+
+try:
+    _log_fh = open(_BASE / "studio_debug.log", "a", encoding="utf-8", buffering=1)
+    import datetime as _dt
+    _log_fh.write(f"\n===== Artwork Studio start {_dt.datetime.now().isoformat()} =====\n")
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
+    sys.stderr = _Tee(sys.__stderr__, _log_fh)
+except Exception:
+    pass
+
 # Load .env before importing app (auth/nextcloud/prompt config read it at import).
 try:
     from dotenv import load_dotenv
@@ -53,7 +122,8 @@ import uvicorn
 import app as app_module
 import agent
 import local_worker
-from src.browser import is_logged_in
+from src.browser import is_logged_in, wait_for_login
+import src.browser as agent_browser
 
 
 HOST = "127.0.0.1"
@@ -150,6 +220,7 @@ class StudioGUI:
         self._context = None
         self._page = None
         self._signed_in = False
+        self._signin_opened = False   # a plain sign-in browser was opened
         self._browser_thread = threading.Thread(target=self._browser_loop, daemon=True)
         self._browser_thread.start()
 
@@ -218,9 +289,32 @@ class StudioGUI:
 
     # -------------------------------------------------- button handlers
     def _on_signin(self):
+        # Two-phase login: open a PLAIN Chrome (no automation) so Cloudflare lets
+        # you through and you can sign in exactly like your normal browser. The
+        # cookies (cf_clearance + ChatGPT session) land in the automation
+        # profile; when you later click Start we close this browser and attach
+        # the automation to that same profile, inheriting the clearance.
         self.signin_btn.config(state="disabled")
-        self._set_state("not_signed_in", "Opening browser to sign in…")
-        self._cmd_queue.put(("signin", None))
+        self._set_state("not_signed_in", "Opening a normal browser to sign in…")
+        try:
+            ok = agent_browser.open_plain_signin_browser("acct1")
+        except Exception as exc:
+            traceback.print_exc()
+            ok = False
+        if ok:
+            self._signin_opened = True
+            self._set_state("not_signed_in",
+                            "Sign in / clear the check in the browser, then click Start.")
+            messagebox.showinfo(
+                "Sign in to ChatGPT",
+                "A normal Chrome window has opened.\n\n"
+                "1) Complete any Cloudflare check and sign in to ChatGPT there.\n"
+                "2) Leave it on the ChatGPT page (you should see the chat box).\n"
+                "3) Come back here and click Start.\n\n"
+                "The app will close that window and take over your signed-in session.")
+        else:
+            self.signin_btn.config(state="normal")
+            self._set_state("error", "Could not open the sign-in browser.")
 
     def _on_start(self):
         self._persist()
@@ -295,8 +389,7 @@ class StudioGUI:
             page = self._ensure_context()
             # ALWAYS (re)navigate to chatgpt.com on a sign-in click, bounded so a
             # slow/unreachable network can't leave the browser stuck on
-            # about:blank forever. open_browser_context() may have already
-            # timed out its own initial nav, so we retry here explicitly.
+            # about:blank forever.
             nav_ok = False
             nav_err = ""
             try:
@@ -310,42 +403,60 @@ class StudioGUI:
                 nav_err = str(nav_exc)
                 self._events.put(("log", f"sign-in navigation to chatgpt.com failed: {nav_exc}"))
 
-            logged_in = False
-            if nav_ok:
-                try:
-                    logged_in = is_logged_in(page)
-                except Exception:
-                    logged_in = False
-            self._signed_in = bool(logged_in)
-            local_worker.set_logged_in(self._signed_in)
-            if nav_ok:
-                self._events.put(("signin_done", logged_in))
-            else:
-                # Navigation itself failed — this is almost always the PC being
-                # unable to reach chatgpt.com (network/DNS/proxy/firewall). Say so
-                # clearly instead of sitting on "Opening browser to sign in…".
+            if not nav_ok:
+                # Navigation itself failed — almost always the PC being unable to
+                # reach chatgpt.com (network/DNS/proxy/firewall).
                 self._events.put(("signin_error",
                                   "Could not load chatgpt.com. Check this PC can open "
                                   "https://chatgpt.com in a normal browser (network/proxy/firewall). "
                                   + (nav_err[:200] if nav_err else "")))
+                return
+
+            # PATIENT WAIT: give the human time to clear any Cloudflare
+            # "Verifying…" screen and/or sign in by hand. This is the reliable
+            # way to get past Cloudflare on a CDP-driven browser — a real person
+            # completes the check once, and the session then persists in the
+            # profile so later runs skip it. We surface progress to the UI.
+            self._events.put(("status", ("not_signed_in",
+                                          "Complete the ChatGPT/Cloudflare check in the browser window…")))
+            logged_in = wait_for_login(
+                page, timeout=300.0,
+                on_status=lambda m: self._events.put(("status", ("not_signed_in", m))),
+            )
+            self._signed_in = bool(logged_in)
+            local_worker.set_logged_in(self._signed_in)
+            self._events.put(("signin_done", logged_in))
         except Exception as exc:
             traceback.print_exc()
             self._events.put(("signin_error", str(exc)))
 
     def _do_start(self):
         try:
+            # 0) If a PLAIN sign-in browser was opened, close it and free the
+            #    profile so the automated browser can attach to the SAME profile
+            #    and inherit the Cloudflare clearance + login cookies.
+            if self._signin_opened:
+                self._events.put(("status", ("not_signed_in", "Taking over your signed-in session…")))
+                try:
+                    agent_browser.close_plain_signin_browser("chrome")
+                except Exception:
+                    traceback.print_exc()
+                self._signin_opened = False
+
             # 1) Local mode + web server (idempotent).
             app_module.enable_local_mode()
             self._ensure_server()
 
-            # 2) Open (or reuse) the browser on THIS thread.
-            cold = self._context is None
+            # 2) Open (or reuse) the automated browser on THIS thread. It attaches
+            #    to the profile the sign-in browser just populated.
             page = self._ensure_context()
-            if self._signed_in and not cold:
-                logged_in = True
-            else:
-                logged_in = is_logged_in(page)
-                self._signed_in = bool(logged_in)
+            # Patiently confirm readiness (cookies should carry the session, so
+            # this usually returns immediately).
+            logged_in = wait_for_login(
+                page, timeout=180.0,
+                on_status=lambda m: self._events.put(("status", ("not_signed_in", m))),
+            )
+            self._signed_in = bool(logged_in)
             local_worker.set_logged_in(logged_in)
 
             self._events.put(("started", None))
