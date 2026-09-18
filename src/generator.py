@@ -664,19 +664,35 @@ def _type_multiline(page: Page, text: str) -> None:
 def _wait_for_upload_thumbnails(page: Page, expected_count: int) -> None:
     """Poll until the composer shows exactly `expected_count` upload thumbnails.
 
-    Uses wait_for_function so we never sleep on a fixed timer.  Times out after 30 s.
+    Counts only images inside the composer (the form around PROMPT_BOX), because
+    earlier turns in the same chat also contain estuary/content images. Polls
+    from Python with page.evaluate — wait_for_function is blocked by ChatGPT's
+    CSP (no 'unsafe-eval') on the CDP-attached browser. Times out after 90 s.
     Also waits for SEND_BUTTON to appear — it only becomes visible once the
     composer has content, confirming the upload is fully attached.
     """
-    page.wait_for_selector(COMPOSER_THUMBNAIL, state="visible", timeout=30_000)
+    deadline = time.monotonic() + 90
+    count = 0
+    while time.monotonic() < deadline:
+        count = page.evaluate(
+            """([selector, box]) => {
+                const editor = document.querySelector(box);
+                const root = (editor && editor.closest('form')) || document;
+                return root.querySelectorAll(selector).length;
+            }""",
+            [COMPOSER_THUMBNAIL, PROMPT_BOX],
+        )
+        if count >= expected_count:
+            break
+        page.wait_for_timeout(500)
+    else:
+        raise GenerationTimeoutError(
+            f"Uploaded image(s) never appeared in the ChatGPT composer "
+            f"(saw {count}, expected {expected_count}) — the upload may have "
+            f"failed or ChatGPT may have hit an upload limit."
+        )
 
-    page.wait_for_function(
-        """([selector, count]) => document.querySelectorAll(selector).length >= count""",
-        arg=[COMPOSER_THUMBNAIL, expected_count],
-        timeout=30_000,
-    )
-
-    page.wait_for_selector(SEND_BUTTON, state="visible", timeout=10_000)
+    page.wait_for_selector(SEND_BUTTON, state="visible", timeout=30_000)
 
 
 def _save_error_screenshot(page: Page, run_id: str) -> None:

@@ -48,6 +48,34 @@ class PrintshopError(RuntimeError):
         self.status = status
 
 
+# What the generator may file. It makes working artwork (WRK) and mockups (MU);
+# a reference (REF) or a final for approval (FNL) only when the operator
+# explicitly picks one. SRC comes from the CRM, and FNLA/GS mark a file
+# production-ready — decisions that belong to people, never to this app.
+SAVE_KINDS = ("WRK", "MU")
+UPLOAD_LIFECYCLES = ("WRK", "MU", "FNL", "REF")
+# Stages that continue an existing design and so must name the design they
+# belong to (attach_to); REF starts a new design and is given a new number.
+ATTACHING_LIFECYCLES = ("WRK", "MU", "FNL")
+
+
+def _unreachable(exc: requests.RequestException, sending: bool) -> PrintshopError:
+    """A readable error for a PrintShop that could not be reached.
+
+    A failed connection means the request never arrived, so nothing was saved.
+    A read timeout on an upload is different: PrintShop may have saved the file
+    and only the answer was lost, so saying "nothing was saved" would invite a
+    duplicate save."""
+    host = BACKEND.split("//", 1)[-1]
+    if sending and isinstance(exc, requests.ReadTimeout):
+        return PrintshopError(
+            f"PrintShop ({host}) did not answer in time. The file may or may not "
+            f"have been saved — check the Artwork Vault before saving again.", 504)
+    return PrintshopError(
+        f"Could not reach the PrintShop vault at {host}, so nothing was saved. "
+        f"Check PRINTSHOP_BACKEND in .env and that this PC can reach that address.", 503)
+
+
 def _secret() -> str:
     secret = os.getenv("PRINTSHOP_JWT_SECRET") or os.getenv("JWT_SECRET") or ""
     if not secret:
@@ -120,9 +148,9 @@ def vault_token() -> str:
 
 def _get(path: str, params: dict) -> dict:
     try:
-        response = requests.get(f"{BACKEND}{path}", params=params, timeout=30)
+        response = requests.get(f"{BACKEND}{path}", params=params, timeout=(5, 30))
     except requests.RequestException as exc:
-        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+        raise _unreachable(exc, sending=False) from exc
     try:
         body = response.json()
     except ValueError:
@@ -172,26 +200,34 @@ def upload_to_vault(key: str, lifecycle: str, attach_to: str,
                     file_name: str, data: bytes, mime: str) -> dict:
     """Add a generated file to a customer's folder under the shop's naming.
 
-    REF and SRC start a design and are given the next free number for that
-    client — read from the vault, so it can never repeat one already in use.
-    WRK, FNL and FNLA continue a design that already exists and inherit its
-    number; only the type suffix changes.
+    REF starts a design and is given the next free number for that client —
+    read from the vault, so it can never repeat one already in use. WRK, MU and
+    FNL continue a design that already exists (`attach_to`) and inherit its
+    number; only the type suffix and version change. SRC, FNLA and GS are
+    refused here: see UPLOAD_LIFECYCLES.
     """
     if not data:
         raise PrintshopError("The generated file is empty.", 400)
-    fields = {"token": vault_token(), "entity_key": key,
-              "lifecycle_code": (lifecycle or "SRC").upper()}
-    if attach_to:
+    lifecycle = (lifecycle or "WRK").upper()
+    if lifecycle not in UPLOAD_LIFECYCLES:
+        raise PrintshopError(
+            f"The generator does not save {lifecycle} files — choose "
+            f"{', '.join(UPLOAD_LIFECYCLES)}.", 400)
+    if lifecycle in ATTACHING_LIFECYCLES and not attach_to:
+        raise PrintshopError(
+            f"A {lifecycle} file continues an existing design — pick which one.", 400)
+    fields = {"token": vault_token(), "entity_key": key, "lifecycle_code": lifecycle}
+    if attach_to and lifecycle in ATTACHING_LIFECYCLES:
         fields["attach_to"] = attach_to
     try:
         response = requests.post(
             f"{BACKEND}/api/artworks/studio/vault/upload",
             data=fields,
             files={"file": (file_name or "artwork.png", data, mime or "image/png")},
-            timeout=120,
+            timeout=(5, 120),
         )
     except requests.RequestException as exc:
-        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+        raise _unreachable(exc, sending=True) from exc
 
     try:
         body = response.json()
@@ -204,32 +240,40 @@ def upload_to_vault(key: str, lifecycle: str, attach_to: str,
             response.status_code)
 
     saved = body.get("data") or {}
+    path = saved.get("path") or ""
     return {
         "name": saved.get("file_name") or "",
-        "path": saved.get("path") or "",
-        "folder": saved.get("folder") or "",
+        "path": path,
+        "folder": saved.get("folder") or path.rsplit("/", 1)[0],
         "artwork_code": saved.get("artwork_code") or "",
+        "version_no": saved.get("version_no"),
         "stage": saved.get("lifecycle_code") or lifecycle,
     }
 
 
-def save_working_file(asset_id: str, file_name: str, data: bytes, mime: str) -> dict:
-    """Send the generated bytes to PrintShop as the design's next WRK version.
+def save_working_file(asset_id: str, file_name: str, data: bytes, mime: str,
+                      kind: str = "WRK") -> dict:
+    """Send the generated bytes to PrintShop as the design's next WRK (or MU)
+    version.
 
     PrintShop picks the name, the folder and the version, then indexes the new
     file — so it appears in the Design Studio vault without a sync.
     """
     if not data:
         raise PrintshopError("The generated file is empty.", 400)
+    kind = (kind or "WRK").upper()
+    if kind not in SAVE_KINDS:
+        raise PrintshopError(
+            f"The generator only saves {' or '.join(SAVE_KINDS)} files here, not {kind}.", 400)
     try:
         response = requests.post(
             f"{BACKEND}/api/artworks/studio/save",
-            data={"token": artwork_token(asset_id), "kind": "WRK"},
+            data={"token": artwork_token(asset_id), "kind": kind},
             files={"file": (file_name or "artwork.png", data, mime or "image/png")},
-            timeout=120,
+            timeout=(5, 120),
         )
     except requests.RequestException as exc:
-        raise PrintshopError(f"PrintShop could not be reached: {exc}") from exc
+        raise _unreachable(exc, sending=True) from exc
 
     try:
         body = response.json()
@@ -243,9 +287,12 @@ def save_working_file(asset_id: str, file_name: str, data: bytes, mime: str) -> 
             response.status_code)
 
     saved = body.get("data") or {}
+    path = saved.get("path") or ""
     return {
         "name": saved.get("file_name") or "",
-        "path": saved.get("path") or "",
+        "path": path,
+        "folder": saved.get("folder") or path.rsplit("/", 1)[0],
+        "artwork_code": saved.get("artwork_code") or "",
         "version_no": saved.get("version_no"),
-        "stage": saved.get("lifecycle_code") or "WRK",
+        "stage": saved.get("lifecycle_code") or kind,
     }

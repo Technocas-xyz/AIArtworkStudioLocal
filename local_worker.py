@@ -273,6 +273,30 @@ def _run_one_job(page: Any, job: dict) -> None:
                 print(f"[worker] terminal hook failed for {job_id}: {exc}")
 
 
+def _live_page(page: Any) -> Any:
+    """Return a usable page in the same browser context.
+
+    If the operator closes the automation tab (or ChatGPT reopens in another
+    one), the old handle is dead: every check on it fails, the header shows
+    "Not signed in" forever and Generate stays disabled. Adopt a tab that is
+    still open instead — or open a fresh one on chatgpt.com."""
+    try:
+        if not page.is_closed():
+            return page
+        ctx = page.context
+        open_pages = [p for p in ctx.pages if not p.is_closed()]
+        chat = [p for p in open_pages if "chatgpt.com" in (p.url or "")]
+        new = (chat or open_pages or [None])[0]
+        if new is None:
+            new = ctx.new_page()
+            new.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=60_000)
+        print(f"[worker] automation tab was closed — using {new.url}")
+        return new
+    except Exception as exc:
+        print(f"[worker] could not recover a browser tab: {exc}")
+        return page
+
+
 def _loop(page: Any, stop_event: threading.Event,
           poll_interval: float = 2.0) -> None:
     with _state_lock:
@@ -280,6 +304,7 @@ def _loop(page: Any, stop_event: threading.Event,
     print("[worker] claim loop started")
     try:
         while not stop_event.is_set():
+            page = _live_page(page)
             # Keep the session flag fresh so the UI header is accurate.
             try:
                 set_logged_in(is_logged_in(page))

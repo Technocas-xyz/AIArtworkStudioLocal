@@ -95,6 +95,15 @@ header h1{font-size:1.2rem;font-weight:700;white-space:nowrap}
 .vm-btn.primary{background:#059669;color:#fff}.vm-btn.primary:hover{background:#047857}.vm-btn.primary:disabled{background:#94a3b8;cursor:not-allowed}
 .vm-btn.ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
 .vm-err{color:#dc2626;font-size:.78rem;margin-right:auto}
+.vm-req{color:#dc2626;font-size:.66rem;font-weight:700;letter-spacing:.04em;margin-left:6px}
+.vm-dlist{margin-top:6px;border:1px solid var(--border);border-radius:8px;max-height:240px;overflow-y:auto;padding:4px}
+.vm-ditem{display:flex;gap:10px;align-items:center;width:100%;padding:6px 8px;border:1px solid transparent;border-radius:7px;background:none;cursor:pointer;text-align:left;font-family:inherit;color:inherit}
+.vm-ditem:hover{background:var(--bg)}
+.vm-ditem.sel{border-color:var(--accent);background:var(--bg)}
+.vm-ditem img{width:40px;height:40px;flex:none;object-fit:contain;border-radius:5px;border:1px solid var(--border);background:#fff}
+.vm-ditem b{display:block;font-size:.82rem}
+.vm-ditem span{display:block;font-size:.72rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vm-dempty{padding:12px;font-size:.78rem;color:var(--muted);text-align:center}
 .vm-ok{color:#059669;font-size:.78rem;margin-right:auto;font-weight:600}
 .toast-wrap{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:1100;display:flex;flex-direction:column;gap:8px;align-items:center}
 .toast{padding:10px 18px;border-radius:8px;font-size:.82rem;font-weight:600;color:#fff;box-shadow:0 6px 20px rgba(0,0,0,.2);animation:toastIn .2s ease}
@@ -1385,6 +1394,12 @@ function vaultCloseModal(){var o=$("vaultModal");if(o&&o.parentNode)o.parentNode
 function vaultRenderModal(name,client,task){
   vaultCloseModal();
   var pre=vaultMatchCustomer(client);
+  // The Design Studio link names ONE design. Offer to file against it only
+  // when this result is for that design/customer — otherwise a later job for a
+  // different customer would be saved as a version of the wrong design.
+  var psFits=!!psAsset&&!!(
+    (psCode&&String(task||"").toUpperCase().indexOf(psCode.toUpperCase())>=0)||
+    (psLabel&&String(client||"").trim().toLowerCase()===psLabel.trim().toLowerCase()));
   // Naam ab hum nahi rakhte — PrintShop rakhta hai, shop ke apne nizaam se.
   var ov=document.createElement("div");
   ov.className="vm-overlay";ov.id="vaultModal";
@@ -1392,14 +1407,15 @@ function vaultRenderModal(name,client,task){
     '<div class="vm-modal" role="dialog" aria-modal="true">'
     +'<div class="vm-head"><h3>☁ Save to Artwork Vault</h3><button class="vm-x" id="vmX" title="Close">×</button></div>'
     +'<div class="vm-body">'
-      +'<div class="vm-preview"><img src="/api/output/'+esc(name)+'" alt=""><div class="vm-hint">Saving into the chosen customer’s <b>AI Artwork</b> folder in the vault.</div></div>'
-      +(psAsset?('<div class="ps-wrk">'
+      +'<div class="vm-preview"><img src="/api/output/'+esc(name)+'" alt=""><div class="vm-hint">PrintShop names it <b>AW-&lt;client&gt;-&lt;number&gt;-&lt;stage&gt;&lt;version&gt;</b> and files it in the customer’s stage folder. Nothing is ever overwritten.</div></div>'
+      +(psFits?('<div class="ps-wrk">'
         +'<div class="ps-wrk-head">From the Design Studio'+(psCode?' \u00b7 '+esc(psCode):'')+'</div>'
-        +'<div class="ps-wrk-note">Files it as the next <b>WRK</b> version of this design, in '
+        +'<div class="ps-wrk-note">Files it as the next version of this design, in '
         +esc(psLabel||'the customer')+'\u2019s Artworks folder. PrintShop picks the name and the '
         +'version number, and it shows in the vault straight away.</div>'
         +'<button class="vm-btn primary" id="vmWrk">Save to Artworks as WRK</button>'
-        +'<div class="ps-wrk-or">or save a plain copy somewhere else:</div>'
+        +'<button class="vm-btn ghost" id="vmMu" style="margin-top:6px">It’s a mockup — save to Mockups as MU</button>'
+        +'<div class="ps-wrk-or">or file it against another customer / design:</div>'
       +'</div>'):'')
       +'<label>Customer</label>'
       +'<input type="text" id="vmFilter" placeholder="Filter customers…" autocomplete="off">'
@@ -1407,15 +1423,16 @@ function vaultRenderModal(name,client,task){
       +'<div class="vm-hint" id="vmCustHint"></div>'
       +'<label>Type</label>'
       +'<select id="vmKind">'
-        +'<option value="SRC">Source — a new design</option>'
-        +'<option value="REF">Reference — a new design</option>'
-        +'<option value="WRK">Work — continues an existing design</option>'
-        +'<option value="FNL">Final — continues an existing design</option>'
-        +'<option value="FNLA">Final Approved — continues an existing design</option>'
+        // No SRC (the CRM files what the customer sent) and no FNLA/GS
+        // (production-ready is a person's call) — the server refuses them too.
+        +'<option value="WRK" selected>Work (WRK) — a new version of an existing design</option>'
+        +'<option value="FNL">Final for approval (FNL) — continues an existing design</option>'
+        +'<option value="REF">Reference (REF) — starts a NEW design with a new number</option>'
       +'</select>'
       +'<div id="vmAttachWrap" style="display:none">'
-        +'<label>Which design?</label>'
-        +'<select id="vmAttach"><option value="">Loading…</option></select>'
+        +'<label>Which design is this for?<span class="vm-req">REQUIRED</span></label>'
+        +'<input type="text" id="vmAttachFilter" placeholder="Search designs…" autocomplete="off">'
+        +'<div class="vm-dlist" id="vmAttachList"><div class="vm-dempty">Loading…</div></div>'
       +'</div>'
       +'<div class="vm-hint" id="vmNameHint"></div>'
     +'</div>'
@@ -1442,63 +1459,89 @@ function vaultRenderModal(name,client,task){
   $("vmX").onclick=vaultCloseModal;$("vmCancel").onclick=vaultCloseModal;
   ov.addEventListener("click",function(e){if(e.target===ov)vaultCloseModal()});
   document.addEventListener("keydown",function esc2(e){if(e.key==="Escape"){vaultCloseModal();document.removeEventListener("keydown",esc2)}});
-  // Kaun si qismein mojooda design ke saath jurti hain. REF aur SRC naya design
-  // shuru karte hain, isliye un ke liye kuch chunna nahi hota.
-  var ATTACHES={WRK:1,FNL:1,FNLA:1};
-  var kindEl=$("vmKind"),attachWrap=$("vmAttachWrap"),attachEl=$("vmAttach"),hintEl=$("vmNameHint");
-  var designs=null,designsFor="";
+  // Kaun si qismein mojooda design ke saath jurti hain. REF naya design shuru
+  // karta hai, isliye us ke liye kuch chunna nahi hota.
+  var ATTACHES={WRK:1,FNL:1};
+  var kindEl=$("vmKind"),attachWrap=$("vmAttachWrap"),listEl=$("vmAttachList"),dFilterEl=$("vmAttachFilter"),hintEl=$("vmNameHint");
+  var designs=null,designsFor="",picked="";
 
   function paintHint(){
     var k=kindEl.value;
-    if(!ATTACHES[k]){hintEl.textContent="PrintShop will give this the next free number for this client, then name it AW-<client>-<number>-"+k+"."; return}
-    var d=designs&&designs.filter(function(x){return x.id===attachEl.value})[0];
-    hintEl.textContent=d?("Saves as "+d.artwork_code+"-"+k+" — the same design, a new stage.")
+    if(!ATTACHES[k]){hintEl.textContent="Only for a genuinely new design: PrintShop gives it the next free number for this client and names it AW-<client>-<number>-"+k+". A variation of an existing design is WRK."; return}
+    var d=designs&&designs.filter(function(x){return x.id===picked})[0];
+    hintEl.textContent=d?("Saves as "+d.artwork_code+"-"+k+(k==="WRK"?"<next version>":"")+" — the same design, a new stage.")
                         :"Pick the design this file belongs to; it keeps that design's number.";
   }
+
+  // The customer's designs as a searchable list with thumbnails, like the
+  // Design Studio vault — one row per artwork code, read from Nextcloud.
+  function paintDesigns(msg){
+    if(msg){listEl.innerHTML='<div class="vm-dempty">'+esc(msg)+'</div>';return}
+    var q=dFilterEl.value.trim().toLowerCase();
+    var list=(designs||[]).filter(function(x){return !q||x.artwork_code.toLowerCase().indexOf(q)>=0||x.file_name.toLowerCase().indexOf(q)>=0});
+    dFilterEl.placeholder="Search "+(designs||[]).length+" designs…";
+    if(!designs.length){listEl.innerHTML='<div class="vm-dempty">This customer has no design yet — use Reference to start one.</div>';return}
+    if(!list.length){listEl.innerHTML='<div class="vm-dempty">No design matches “'+esc(q)+'”.</div>';return}
+    listEl.innerHTML=list.map(function(x){
+      return '<button type="button" class="vm-ditem'+(x.id===picked?' sel':'')+'" data-design="'+esc(x.id)+'">'
+        +'<img loading="lazy" src="/api/nextcloud/thumb?w=96&h=96&path='+encodeURIComponent(x.path)+'" alt="">'
+        +'<div style="min-width:0"><b>'+esc(x.artwork_code)+'</b><span>'+esc(x.file_name)+'</span></div></button>';
+    }).join("");
+  }
+  listEl.addEventListener("click",function(e){
+    var b=e.target.closest("[data-design]");if(!b)return;
+    picked=b.getAttribute("data-design");paintDesigns();paintHint();
+  });
+  dFilterEl.oninput=function(){if(designs)paintDesigns()};
 
   function loadDesigns(){
     var cust=selEl.value;
     if(!ATTACHES[kindEl.value]){attachWrap.style.display="none";paintHint();return}
     attachWrap.style.display="";
-    if(!cust){attachEl.innerHTML='<option value="">Select a customer first</option>';paintHint();return}
-    if(designsFor===cust&&designs){paintHint();return}
-    attachEl.innerHTML='<option value="">Loading…</option>';
+    if(!cust){paintDesigns("Select a customer first.");paintHint();return}
+    if(designsFor===cust&&designs){paintDesigns();paintHint();return}
+    paintDesigns("Loading…");
     fetch("/api/printshop/designs?customer="+encodeURIComponent(cust))
       .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Could not load designs");return d})})
       .then(function(d){
-        designs=d.rows||[];designsFor=cust;
-        attachEl.innerHTML=designs.length
-          ? designs.map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.artwork_code)+' — '+esc(x.file_name)+'</option>'}).join("")
-          : '<option value="">This customer has no design yet — use Source or Reference</option>';
-        paintHint();
+        if(selEl.value!==cust)return;  // customer changed while loading
+        designs=d.rows||[];designsFor=cust;picked="";
+        paintDesigns();paintHint();
       })
-      .catch(function(e){attachEl.innerHTML='<option value="">'+esc(e.message)+'</option>';paintHint()});
+      .catch(function(e){paintDesigns(e.message);paintHint()});
   }
 
   kindEl.onchange=loadDesigns;
-  attachEl.onchange=paintHint;
-  selEl.addEventListener("change",function(){designs=null;designsFor="";loadDesigns()});
+  selEl.addEventListener("change",function(){designs=null;designsFor="";picked="";dFilterEl.value="";loadDesigns()});
   loadDesigns();
 
-  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,kindEl.value,attachEl.value)};
-  if($("vmWrk"))$("vmWrk").onclick=function(){psSaveWrk(name)};
+  $("vmSave").onclick=function(){vaultDoSave(name,selEl.value,kindEl.value,picked)};
+  if($("vmWrk"))$("vmWrk").onclick=function(){psSaveWrk(name,"WRK")};
+  if($("vmMu"))$("vmMu").onclick=function(){psSaveWrk(name,"MU")};
   setTimeout(function(){filterEl.focus()},30);
+}
+// "Saved as AW-ACT01-0003-WRK01.png in Artworks" — the name and folder PrintShop
+// actually chose, so the operator can find it in the vault.
+function vaultSavedMsg(d,fallback){
+  var folder=String(d.folder||"").split("/").pop();
+  return "Saved as "+(d.name||fallback)+(folder?" in "+folder:"");
 }
 // Hand the generated bytes to PrintShop, which owns the name, the folder and
 // the version number. Nothing about the shop's naming standard is worked out
 // here — two places deciding one name is how a design ends up with two.
-function psSaveWrk(name){
-  var msg=$("vmMsg"),btn=$("vmWrk");
-  msg.className="vm-hint";msg.textContent="Saving to the vault\u2026";if(btn)btn.disabled=true;
+function psSaveWrk(name,kind){
+  var msg=$("vmMsg"),btns=[$("vmWrk"),$("vmMu"),$("vmSave")];
+  function lock(on){btns.forEach(function(b){if(b)b.disabled=on})}
+  msg.className="vm-hint";msg.textContent="Saving to the vault\u2026";lock(true);
   fetch("/api/printshop/save-wrk",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:name,asset:psAsset})})
+    body:JSON.stringify({name:name,asset:psAsset,kind:kind||"WRK"})})
     .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Save failed");return d})})
     .then(function(d){
       vaultCloseModal();
-      toast("Saved "+(d.name||name)+" to the vault","ok");
+      toast(vaultSavedMsg(d,name),"ok");
       if(ncPath)ncReloadArtworks();
     })
-    .catch(function(e){msg.className="vm-err";msg.textContent=e.message;if(btn)btn.disabled=false});
+    .catch(function(e){msg.className="vm-err";msg.textContent=e.message;lock(false)});
 }
 // Generated file bhi usi naming se jaati hai jis se baqi sab kuch. Pehle yeh
 // apne hi naam ke saath "AI Artwork" naam ke alag folder me girti thi — number
@@ -1506,7 +1549,7 @@ function psSaveWrk(name){
 function vaultDoSave(name,customer,kind,attachTo){
   var msg=$("vmMsg"),btn=$("vmSave");
   if(!customer){msg.className="vm-err";msg.textContent="Choose a customer first.";return}
-  if({WRK:1,FNL:1,FNLA:1}[kind]&&!attachTo){
+  if({WRK:1,FNL:1}[kind]&&!attachTo){
     msg.className="vm-err";msg.textContent="Pick the design this file belongs to.";return
   }
   msg.className="vm-hint";msg.textContent="Saving…";btn.disabled=true;
@@ -1515,7 +1558,7 @@ function vaultDoSave(name,customer,kind,attachTo){
     .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||"Save failed");return d})})
     .then(function(d){
       vaultCloseModal();
-      toast("Saved as "+(d.name||name),"ok");
+      toast(vaultSavedMsg(d,name),"ok");
       // If that customer's grid is open in the Nextcloud tab, refresh it.
       if(ncPath&&d.folder&&d.folder.indexOf(ncPath)===0)ncReloadArtworks();
     })
