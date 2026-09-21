@@ -1,12 +1,13 @@
-﻿# Per-workflow ChatGPT project. Each workflow starts its chat in its own project
-# so the history stays separated by kind of work (and gives cleanly separated
-# training data later). Fill in each project URL; an empty value falls back to
-# PROJECT_URL_DEFAULT (a plain chat, no project).
+﻿# Per-workflow ChatGPT project. An empty value falls back to PROJECT_URL_DEFAULT
+# (a plain new chat, no project). Left empty so jobs run directly in a new chat
+# on whichever ChatGPT account is signed in; a project URL only works for the
+# account that owns that project. To route a workflow into a project again, paste
+# its URL (e.g. "https://chatgpt.com/g/g-p-<id>/project") below.
 PROJECT_URLS = {
-    "text":    "https://chatgpt.com/g/g-p-6aa2c809a71c8191bed7d2f18478b929/project",   # DTF - Text Designs
-    "mockup":  "https://chatgpt.com/g/g-p-6aa2c81e43bc8191818916d37702b902/project",   # DTF - Artwork Extraction
-    "artwork": "https://chatgpt.com/g/g-p-6aa2c83472348191ab1ed508af3b605b/project",   # DTF - Artwork Generation
-    "custom":  "https://chatgpt.com/g/g-p-6aa2c84537588191af25bf5f4d0673af/project",   # DTF - Custom Operations
+    "text":    "",   # DTF - Text Designs
+    "mockup":  "",   # DTF - Artwork Extraction
+    "artwork": "",   # DTF - Artwork Generation
+    "custom":  "",   # DTF - Custom Operations
 }
 PROJECT_URL_DEFAULT = "https://chatgpt.com"
 
@@ -24,7 +25,9 @@ NEW_CHAT      = "[data-testid='create-new-chat-button']"
 
 GENERATED_IMG = "img[src*='backend-api/estuary/content']"
 
-COMPOSER_THUMBNAIL = "img[src^='blob:']"
+# Upload preview in the composer. Older ChatGPT used a local blob: URL; current
+# ChatGPT shows the uploaded file from backend-api/estuary/content instead.
+COMPOSER_THUMBNAIL = "img[src^='blob:'], img[src*='backend-api/estuary/content']"
 SEND_BUTTON        = "[data-testid='send-button']"
 
 CONVERSATION_TURN = "section[data-testid^='conversation-turn-']"
